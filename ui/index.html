@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PC Booster</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Semi+Condensed:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+  <nav class="side" aria-label="Sezioni">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect x="3" y="7" width="26" height="18" rx="3" fill="none" stroke="currentColor" stroke-width="2"/><path d="M8 19l4-5 4 3 6-7" fill="none" stroke="var(--cool)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span>PC Booster</span>
+    </div>
+    <button class="nav on" data-view="home"><svg viewBox="0 0 24 24"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg>Panoramica</button>
+    <button class="nav" data-view="gpu"><svg viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="9" cy="12" r="3"/><path d="M15 10h4M15 14h4"/></svg>Scheda video</button>
+    <button class="nav" data-view="updates"><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/></svg>Processore e aggiornamenti</button>
+    <button class="nav" data-view="startup"><svg viewBox="0 0 24 24"><path d="M12 3v8"/><path d="M6.3 7.3a8 8 0 1 0 11.4 0"/></svg>Avvio automatico</button>
+    <button class="nav" data-view="clean"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>Pulizia</button>
+    <button class="nav" data-view="apps"><svg viewBox="0 0 24 24"><path d="M6 9h4M8 7v4"/><circle cx="15" cy="10" r=".6"/><circle cx="17" cy="12" r=".6"/><path d="M7 5h10a5 5 0 0 1 4.9 6l-1 5a3 3 0 0 1-5.4 1.2L14 15h-4l-1.5 2.2A3 3 0 0 1 3.1 16l-1-5A5 5 0 0 1 7 5z"/></svg>App e giochi</button>
+    <div class="side-foot">
+      <button class="nav" data-view="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>Impostazioni</button>
+      <div id="adminState" class="admin"></div>
+    </div>
+  </nav>
+
+  <main>
+    <div class="banner" id="updBanner" hidden>
+      <div><b id="updBannerTitle"></b><span id="updBannerText"></span></div>
+      <button class="btn primary small" id="updBannerBtn">Aggiorna ora</button>
+    </div>
+    <!-- PANORAMICA -->
+    <section class="view on" id="view-home">
+      <header class="top">
+        <div>
+          <h1 id="pcName">Il tuo PC</h1>
+          <p class="sub" id="osLine">Lettura del sistema in corso…</p>
+        </div>
+        <div class="top-actions">
+          <button class="btn big" id="checkupBtn">Fai il check-up</button>
+          <button class="btn primary big" id="optimizeBtn">Ottimizza tutto</button>
+        </div>
+      </header>
+
+      <div class="specs" id="specs"></div>
+
+      <div class="meters">
+        <div class="meter"><span>Processore</span><b id="mCpu">–</b><i><em id="bCpu"></em></i></div>
+        <div class="meter"><span>Memoria RAM</span><b id="mRam">–</b><i><em id="bRam"></em></i></div>
+        <div class="meter"><span>Disco di sistema</span><b id="mDisk">–</b><i><em id="bDisk"></em></i></div>
+      </div>
+
+      <div class="findings" id="findings">
+        <h2>Cosa c'è da sistemare</h2>
+        <p class="empty" id="findingsEmpty">Premi <strong>Fai il check-up</strong>: controllo driver della scheda video, aggiornamenti di Windows e del processore, file inutili e spazio su disco.</p>
+        <ul id="findingsList"></ul>
+      </div>
+    </section>
+
+    <!-- SCHEDA VIDEO -->
+    <section class="view" id="view-gpu">
+      <header class="top">
+        <div>
+          <h1>Scheda video</h1>
+          <p class="sub">Driver installato e impostazioni che aiutano nei giochi.</p>
+        </div>
+        <button class="btn" id="gpuRefresh">Ricontrolla</button>
+      </header>
+      <div id="gpuList"></div>
+
+      <h2>Ottimizzazioni per i giochi</h2>
+      <div class="tweaks" id="tweaks">
+        <label class="tweak"><div><b>Modalità Gioco di Windows</b><span>Dà la priorità al gioco aperto e blocca gli aggiornamenti mentre giochi.</span></div><input type="checkbox" data-tweak="game_mode"><i class="sw"></i></label>
+        <label class="tweak"><div><b>Pianificazione GPU con accelerazione hardware</b><span>La scheda video gestisce da sola la sua memoria: meno latenza. Richiede il riavvio.</span></div><input type="checkbox" data-tweak="hags"><i class="sw"></i></label>
+        <label class="tweak"><div><b>Prestazioni elevate</b><span>Il processore non si "addormenta" per risparmiare energia. Consuma un po' di più.</span><small id="planName"></small></div><input type="checkbox" data-tweak="high_perf"><i class="sw"></i></label>
+        <label class="tweak"><div><b>Registrazione in background (Xbox Game Bar)</b><span>Registra di continuo gli ultimi minuti di gioco. Spenta libera risorse.</span></div><input type="checkbox" data-tweak="game_dvr"><i class="sw"></i></label>
+      </div>
+    </section>
+
+    <!-- PROCESSORE E AGGIORNAMENTI -->
+    <section class="view" id="view-updates">
+      <header class="top">
+        <div>
+          <h1>Processore e aggiornamenti</h1>
+          <p class="sub">Cerca su Windows Update i driver per scheda video, chipset e processore, più gli aggiornamenti di sistema.</p>
+        </div>
+        <button class="btn primary" id="updCheck">Cerca aggiornamenti</button>
+      </header>
+      <div class="cpu" id="cpuBox"></div>
+      <div id="updArea"><p class="empty">Nessuna ricerca fatta. La prima può richiedere un paio di minuti.</p></div>
+    </section>
+
+    <!-- AVVIO AUTOMATICO -->
+    <section class="view" id="view-startup">
+      <header class="top">
+        <div>
+          <h1>Avvio automatico</h1>
+          <p class="sub">Programmi che partono da soli quando accendi il PC. Meno ce ne sono, più veloce è l'accensione e più memoria resta ai giochi. Puoi riattivarli quando vuoi.</p>
+        </div>
+        <button class="btn primary" id="startupSuggest">Disattiva i consigliati</button>
+      </header>
+      <div class="applist" id="startupList"></div>
+    </section>
+
+    <!-- PULIZIA -->
+    <section class="view" id="view-clean">
+      <header class="top">
+        <div>
+          <h1>Pulizia</h1>
+          <p class="sub">File temporanei e cache che Windows e i giochi ricreano da soli quando servono.</p>
+        </div>
+        <button class="btn" id="scanBtn">Analizza</button>
+      </header>
+      <div class="junk" id="junkList"><p class="empty">Premi <strong>Analizza</strong> per vedere quanto spazio puoi recuperare.</p></div>
+      <div class="cleanbar" id="cleanBar" hidden>
+        <div><span>Selezionati</span><b id="cleanTotal">0 B</b></div>
+        <button class="btn primary" id="cleanBtn">Pulisci</button>
+      </div>
+    </section>
+
+    <!-- APP E GIOCHI -->
+    <section class="view" id="view-apps">
+      <header class="top">
+        <div>
+          <h1>App e giochi</h1>
+          <p class="sub">Ordinati dal più pesante. La disinstallazione usa il programma ufficiale di ciascuna app.</p>
+        </div>
+        <button class="btn" id="appsRefresh">Aggiorna elenco</button>
+      </header>
+      <div class="filters">
+        <input type="search" id="appSearch" placeholder="Cerca un'app o un gioco" aria-label="Cerca">
+        <div class="seg" role="tablist">
+          <button class="on" data-filter="all">Tutto</button>
+          <button data-filter="games">Giochi</button>
+          <button data-filter="apps">App</button>
+        </div>
+      </div>
+      <div class="applist" id="appList"></div>
+    </section>
+    <!-- IMPOSTAZIONI -->
+    <section class="view" id="view-settings">
+      <header class="top">
+        <div>
+          <h1>Impostazioni</h1>
+          <p class="sub" id="verLine">Versione</p>
+        </div>
+        <button class="btn" id="appUpdCheck">Cerca una versione nuova</button>
+      </header>
+      <div class="tweaks">
+        <label class="tweak"><div><b>Aggiorna PC Booster da solo</b><span>All'avvio controlla se hai pubblicato una versione nuova su GitHub e la installa senza chiederti niente.</span><small id="repoLine"></small></div><input type="checkbox" id="autoUpd"><i class="sw"></i></label>
+      </div>
+      <p class="empty" id="appUpdResult" style="margin-top:18px"></p>
+    </section>
+  </main>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<dialog id="confirm">
+  <form method="dialog">
+    <h3 id="confirmTitle"></h3>
+    <p id="confirmText"></p>
+    <div class="row">
+      <button class="btn" value="no">Annulla</button>
+      <button class="btn danger" value="yes" id="confirmYes">Conferma</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="app.js"></script>
+</body>
+</html>
