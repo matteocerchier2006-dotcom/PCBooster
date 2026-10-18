@@ -13,6 +13,7 @@ async function ready() {
   state.prefs = await api.get_prefs();
   applyPrefs();
   bindSettings();
+  bindTray();
   go(state.prefs.start_page || 'home');
   loadHome();
   loadTweaks();
@@ -724,3 +725,20 @@ $('#gameBtn').addEventListener('click', e => busy(e.currentTarget, async () => {
   }
   await loadGame();
 }));
+
+// ================= Icona vicino all'orologio =================
+function bindTray() {
+  $$('[data-tray]').forEach(i => {
+    const k = i.dataset.tray;
+    i.checked = k === 'start_with_windows' ? !!state.prefs[k] : state.prefs[k] !== false;
+    i.onchange = async () => {
+      const r = await api.set_tray(k, i.checked); toast(r.msg, r.ok);
+      if (!r.ok) i.checked = !i.checked; else state.prefs[k] = i.checked;
+    };
+  });
+}
+$('#trayCheck').addEventListener('click', async () => { const r = await api.tray_check_now(); toast(r.msg, r.ok); });
+window.onTrayChange = async () => {
+  const g = await api.get_game_mode(); $('#gameDot').hidden = !g.state;
+  if (state.view === 'game') loadGame();
+};

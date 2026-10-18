@@ -12,6 +12,7 @@ App per Windows 10/11 che tiene in forma il PC: driver della scheda video, aggio
 - **Aggiornamenti**: processore, scheda madre, BIOS, Windows Update e aggiornamento di tutti i programmi con winget.
 - **Driver NVIDIA e AMD**: controlla online l'ultima versione, la scarica e apre l'installazione ufficiale.
 - **Avvio automatico** e **App e giochi**.
+- **Icona vicino all'orologio**: resta attivo chiudendo la finestra, parte con Windows, manda notifiche (driver nuovo, aggiornamenti, spazio da liberare) e dal menu attiva Modalità partita e Pulizia veloce.
 - **Impostazioni**: temi, colori, caratteri, angoli, barra compatta; aggiornamento automatico; pulizia programmata; punto di ripristino.
 
 ## Come funziona
@@ -35,5 +36,6 @@ GitHub crea da solo `PCBooster.exe` ogni volta che pubblichi una nuova release. 
 - `build.py` e `icon.ico`: creazione dell'exe con icona e versione (li usa GitHub)
 - `updater.py`: aggiornamento automatico dell'app e impostazioni
 - `launcher.py`: avvio senza la richiesta dei permessi
+- `tray.py`: icona vicino all'orologio, notifiche, una sola istanza
 - `ui/`: interfaccia (HTML, CSS, JavaScript)
 - `.github/workflows/pubblica.yml`: istruzioni per GitHub su come creare l'exe

@@ -58,6 +58,9 @@ DEFAULT_SETTINGS = {
     # avvio senza richiesta dei permessi (attività di Windows + collegamento sul desktop)
     "no_uac_prompt": True,
     "last_version": "",
+    # icona vicino all'orologio
+    "tray_enabled": True, "start_with_windows": False, "notifications": True,
+    "tray_tip_seen": False, "notified": {},
     # modalità partita (gestite dall'app, non dalle preferenze dell'interfaccia)
     "game_mode_state": None,
     "game_mode_opts": {"power": True, "ram": True, "close": True, "reopen": True},

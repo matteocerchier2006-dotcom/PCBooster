@@ -170,8 +170,8 @@ class Api:
         self._apps_cache = []
         self._startup_cache = []
         self._lock = threading.Lock()
-        self.cleaner = Cleaner()
-        self.driver_dl = drivers.DriverDownloader()
+        self._cleaner = Cleaner()
+        self._driver_dl = drivers.DriverDownloader()
         self._gpus = None
 
     # ================= Panoramica =================
@@ -404,17 +404,17 @@ class Api:
         if not IS_WINDOWS:
             import time as _t
             def fake():
-                self.driver_dl.state = {"status": "downloading", "done": 0, "total": 866_000_000}
+                self._driver_dl.state = {"status": "downloading", "done": 0, "total": 866_000_000}
                 for i in range(1, 11):
                     _t.sleep(0.35)
-                    self.driver_dl.state["done"] = 86_600_000 * i
-                self.driver_dl.state = {"status": "launched", "msg": "Demo: installazione avviata."}
+                    self._driver_dl.state["done"] = 86_600_000 * i
+                self._driver_dl.state = {"status": "launched", "msg": "Demo: installazione avviata."}
             threading.Thread(target=fake, daemon=True).start()
             return {"ok": True}
-        return self.driver_dl.start(url, vendor)
+        return self._driver_dl.start(url, vendor)
 
     def driver_progress(self):
-        return self.driver_dl.progress()
+        return self._driver_dl.progress()
 
     # ---------- aggiornamento app (winget) ----------
     def list_app_updates(self):
@@ -591,19 +591,19 @@ class Api:
 
     # ================= Pulizia =================
     def scan_junk(self):
-        return self.cleaner.scan()
+        return self._cleaner.scan()
 
     def clean_junk(self, ids):
-        return self.cleaner.clean(ids)
+        return self._cleaner.clean(ids)
 
     def find_large_files(self, min_mb=250):
-        return self.cleaner.find_large_files(int(min_mb))
+        return self._cleaner.find_large_files(int(min_mb))
 
     def reveal_file(self, item_id):
-        return self.cleaner.reveal_file(item_id)
+        return self._cleaner.reveal_file(item_id)
 
     def recycle_file(self, item_id):
-        return self.cleaner.recycle_file(item_id)
+        return self._cleaner.recycle_file(item_id)
 
     # ---------- pulizia automatica (Utilità di pianificazione di Windows) ----------
     def get_auto_clean(self):
@@ -641,9 +641,9 @@ class Api:
 
     def auto_clean(self):
         """Chiamata dall'attività pianificata: pulisce le voci sicure, senza finestra."""
-        scan = self.cleaner.scan()
+        scan = self._cleaner.scan()
         ids = [i["id"] for i in scan["items"] if i["default"] and i["id"] not in ("recycle",)]
-        return self.cleaner.clean(ids)
+        return self._cleaner.clean(ids)
 
     # ================= Aggiornamenti di Windows =================
     def check_updates(self):

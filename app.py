@@ -13,9 +13,11 @@ import threading
 import updater
 import launcher
 import apptools
+import tray
 from backend import Api, is_admin, relaunch_as_admin, IS_WINDOWS
 
-ALLOWED_PREFS = set(updater.DEFAULT_SETTINGS) - {"game_mode_state", "game_mode_opts", "game_mode_close"}
+ALLOWED_PREFS = set(updater.DEFAULT_SETTINGS) - {"game_mode_state", "game_mode_opts", "game_mode_close", "last_version",
+                                                  "notified", "tray_tip_seen", "start_with_windows"}
 
 
 def resource_path(rel: str) -> str:
@@ -123,6 +125,29 @@ class AppApi(Api):
         updater.save_settings({"game_mode_state": None})
         return r
 
+    # ---------- icona vicino all'orologio ----------
+    def set_tray(self, key, enabled):
+        if key == "start_with_windows":
+            r = tray.set_start_with_windows(bool(enabled))
+            if r["ok"]:
+                updater.save_settings({"start_with_windows": bool(enabled)})
+            return r
+        if key in ("tray_enabled", "notifications"):
+            updater.save_settings({key: bool(enabled)})
+            if key == "tray_enabled" and enabled and getattr(self, "_tray", None) and self._tray.icon is None:
+                self._tray.start()
+            msgs = {"tray_enabled": ("Chiudendo la finestra PC Booster resterà vicino all'orologio.",
+                                     "Chiudendo la finestra PC Booster si chiuderà del tutto."),
+                    "notifications": ("Notifiche attivate.", "Notifiche disattivate.")}[key]
+            return {"ok": True, "msg": msgs[0] if enabled else msgs[1]}
+        return {"ok": False, "msg": "Opzione sconosciuta."}
+
+    def tray_check_now(self):
+        if getattr(self, "_tray", None) and self._tray.icon:
+            self._tray.check_now()
+            return {"ok": True, "msg": "Controllo in corso: se trovo qualcosa ti avviso con una notifica."}
+        return {"ok": False, "msg": "Attiva prima l'icona vicino all'orologio."}
+
     # ---------- avvio senza richiesta dei permessi ----------
     def set_no_uac(self, enabled):
         updater.save_settings({"no_uac_prompt": bool(enabled)})
@@ -143,6 +168,10 @@ def main():
         Api().auto_clean()
         return
 
+    # Se PC Booster è già aperto (anche solo vicino all'orologio), mostra quello e basta
+    if tray.signal_existing_instance():
+        return
+
     # Chiede i permessi di amministratore (servono per driver, aggiornamenti e pulizia di sistema)
     if IS_WINDOWS and not is_admin() and "--no-admin" not in sys.argv:
         if relaunch_as_admin():
@@ -152,19 +181,44 @@ def main():
     updater.cleanup_old_versions()
     api = AppApi()
     prefs = updater.load_settings()
+
+    # Parte nascosto se avviato con Windows (--tray) o dopo un aggiornamento fatto in background
+    flag = os.path.join(os.path.dirname(updater._settings_path()), "start_hidden")
+    start_hidden = "--tray" in sys.argv or os.path.exists(flag)
+    if os.path.exists(flag):
+        try:
+            os.remove(flag)
+        except OSError:
+            pass
+
     # Tiene aggiornati attività e collegamento (anche se l'exe è stato spostato)
     if IS_WINDOWS and launcher.IS_FROZEN and is_admin() and prefs.get("no_uac_prompt", True):
         threading.Thread(target=launcher.enable, daemon=True).start()
+    if api._just_updated:
+        tray.refresh_icons()
+
     bg = {"light": "#eef0f5", "amoled": "#000000"}.get(prefs.get("theme"), "#111319")
     window = webview.create_window(
         "PC Booster",
         resource_path(os.path.join("ui", "index.html")),
         js_api=api,
         width=1220, height=780, min_size=(1000, 660),
-        background_color=bg,
+        background_color=bg, hidden=start_hidden,
     )
+    icon = tray.Tray(api, window, resource_path("icon.ico"))
+    icon._visible = not start_hidden
+    api._tray = icon
+    window.events.closing += icon.on_closing
+    window.events.closed += icon.on_closed
     window.events.closed += api.on_close
-    webview.start()
+
+    def on_start():
+        tray.start_instance_server(icon.show_window)
+        if prefs.get("tray_enabled", True) or start_hidden:
+            if not icon.start() and start_hidden:
+                icon.show_window()   # senza icona non si può restare nascosti
+
+    webview.start(on_start)
 
 
 if __name__ == "__main__":

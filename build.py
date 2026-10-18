@@ -55,7 +55,7 @@ def main():
     cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--onefile", "--windowed",
            "--name", "PCBooster", "--icon", "icon.ico", "--version-file", "version_info.txt",
            "--add-data", f"ui{sep}ui", "--add-data", f"version.txt{sep}.", "--add-data", f"repo.txt{sep}.",
-           "--add-data", f"icon.ico{sep}.", "app.py"]
+           "--add-data", f"icon.ico{sep}.", "--hidden-import", "pystray._win32", "app.py"]
     if os.name == "nt":
         cmd.insert(5, "--uac-admin")
     print("Versione:", ver, "| Repository:", repo)
