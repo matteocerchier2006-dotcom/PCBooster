@@ -55,6 +55,8 @@ DEFAULT_SETTINGS = {
     "compact_sidebar": False, "animations": True, "glow": True, "start_page": "home",
     # sicurezza
     "restore_before_optimize": True,
+    # avvio senza richiesta dei permessi (attività di Windows + collegamento sul desktop)
+    "no_uac_prompt": True,
 }
 def _settings_path():
     base = os.environ.get("APPDATA") or os.path.expanduser("~")
@@ -132,26 +134,44 @@ def download_update(url: str, expected_size: int = 0):
     return {"ok": True, "path": new_exe, "msg": "Aggiornamento scaricato."}
 
 
+def _pids_to_wait():
+    """L'exe di PyInstaller è fatto di due processi (avvio + app): bisogna aspettare che finiscano entrambi."""
+    pids = [os.getpid()]
+    try:
+        import psutil
+        parent = psutil.Process(os.getpid()).parent()
+        if parent and os.path.normcase(parent.exe()) == os.path.normcase(sys.executable):
+            pids.append(parent.pid)
+    except Exception:
+        pass
+    return pids
+
+
 def apply_update(new_exe: str, restart: bool = True):
     """Sostituisce l'exe appena l'app si chiude. Con restart=True la riapre subito dopo."""
     if not IS_FROZEN or not new_exe or not os.path.isfile(new_exe):
         return {"ok": False, "msg": "Nessun aggiornamento pronto."}
+    import launcher
     target = sys.executable
     tmp_dir = os.path.dirname(new_exe)
     bat = os.path.join(tmp_dir, "aggiorna.bat")
-    pid = os.getpid()
-    reopen = f'start "" "{target}"' if restart else "rem"
+    waits = "\n".join(
+        f':aspetta{i}\ntasklist /FI "PID eq {pid}" 2>nul | find " {pid} " >nul && (ping -n 2 127.0.0.1 >nul & goto aspetta{i})'
+        for i, pid in enumerate(_pids_to_wait()))
+    reopen = launcher.relaunch_command(target) if restart else "rem"
+    # Nota: "ping" fa da pausa perché "timeout" non funziona in uno script senza finestra
     with open(bat, "w", encoding="mbcs" if os.name == "nt" else "utf-8") as f:
         f.write(f"""@echo off
-:aspetta
-tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul && (timeout /t 1 /nobreak >nul & goto aspetta)
-set /a tentativi=0
+{waits}
+set /a n=0
 :sostituisci
 move /y "{new_exe}" "{target}" >nul 2>&1
-if errorlevel 1 (
-  set /a tentativi+=1
-  if %tentativi% lss 20 (timeout /t 1 /nobreak >nul & goto sostituisci)
-)
+if not errorlevel 1 goto fatto
+set /a n+=1
+if %n% geq 90 goto fatto
+ping -n 2 127.0.0.1 >nul
+goto sostituisci
+:fatto
 {reopen}
 (goto) 2>nul & rmdir /s /q "{tmp_dir}"
 """)

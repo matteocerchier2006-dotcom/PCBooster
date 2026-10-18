@@ -97,7 +97,16 @@ function bindSettings() {
   $('#startPick').onchange = e => setPref('start_page', e.target.value);
   $$('[data-pref]').forEach(i => {
     i.checked = !!p[i.dataset.pref];
-    i.onchange = () => { setPref(i.dataset.pref, i.checked); if (i.dataset.pref === 'auto_update') toast('Aggiornamento automatico ' + (i.checked ? 'attivato.' : 'disattivato.')); };
+    i.onchange = async () => {
+      if (i.dataset.pref === 'no_uac_prompt') {
+        state.prefs.no_uac_prompt = i.checked;
+        const r = await api.set_no_uac(i.checked); toast(r.msg, r.ok);
+        if (!r.ok) { i.checked = !i.checked; state.prefs.no_uac_prompt = i.checked; }
+        return;
+      }
+      setPref(i.dataset.pref, i.checked);
+      if (i.dataset.pref === 'auto_update') toast('Aggiornamento automatico ' + (i.checked ? 'attivato.' : 'disattivato.'));
+    };
   });
   $('#resetLook').onclick = async () => {
     state.prefs = await api.reset_prefs(); applyPrefs(); bindSettings(); toast('Aspetto predefinito ripristinato.');

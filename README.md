@@ -29,5 +29,6 @@ GitHub crea da solo `PCBooster.exe` ogni volta che pubblichi una nuova release. 
 - `backend.py`: tutte le operazioni sul PC (PowerShell, registro, Windows Update)
 - `cleaner.py`: pulizia e file grandi
 - `updater.py`: aggiornamento automatico dell'app e impostazioni
+- `launcher.py`: avvio senza la richiesta dei permessi
 - `ui/`: interfaccia (HTML, CSS, JavaScript)
 - `.github/workflows/pubblica.yml`: istruzioni per GitHub su come creare l'exe

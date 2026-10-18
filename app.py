@@ -11,6 +11,7 @@ import sys
 import threading
 
 import updater
+import launcher
 from backend import Api, is_admin, relaunch_as_admin, IS_WINDOWS
 
 ALLOWED_PREFS = set(updater.DEFAULT_SETTINGS)
@@ -88,6 +89,11 @@ class AppApi(Api):
         if self._update.get("status") == "ready" and updater.load_settings().get("auto_update", True):
             updater.apply_update(self._update["path"], restart=False)
 
+    # ---------- avvio senza richiesta dei permessi ----------
+    def set_no_uac(self, enabled):
+        updater.save_settings({"no_uac_prompt": bool(enabled)})
+        return launcher.enable() if enabled else launcher.disable()
+
     def restart_as_admin(self):
         if relaunch_as_admin():
             import webview
@@ -111,6 +117,9 @@ def main():
     import webview
     api = AppApi()
     prefs = updater.load_settings()
+    # Tiene aggiornati attività e collegamento (anche se l'exe è stato spostato)
+    if IS_WINDOWS and launcher.IS_FROZEN and is_admin() and prefs.get("no_uac_prompt", True):
+        threading.Thread(target=launcher.enable, daemon=True).start()
     bg = {"light": "#eef0f5", "amoled": "#000000"}.get(prefs.get("theme"), "#111319")
     window = webview.create_window(
         "PC Booster",
