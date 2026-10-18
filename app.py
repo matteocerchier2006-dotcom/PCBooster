@@ -1,15 +1,19 @@
 """
 PC Booster - avvio dell'applicazione.
 Apre una finestra con l'interfaccia (cartella ui/) collegata al motore (backend.py).
+
+Avvii speciali:
+  --auto-clean   pulizia programmata, senza finestra (la usa l'Utilità di pianificazione)
+  --no-admin     non chiede i permessi di amministratore
 """
 import os
 import sys
 import threading
 
-import webview
-
 import updater
 from backend import Api, is_admin, relaunch_as_admin, IS_WINDOWS
+
+ALLOWED_PREFS = set(updater.DEFAULT_SETTINGS)
 
 
 def resource_path(rel: str) -> str:
@@ -19,48 +23,103 @@ def resource_path(rel: str) -> str:
 
 
 class AppApi(Api):
+    def __init__(self):
+        super().__init__()
+        self._update = {"status": "idle"}   # idle | checking | none | ready | error
+        self._update_lock = threading.Lock()
+
+    # ---------- preferenze (aspetto, opzioni) ----------
+    def get_prefs(self):
+        return updater.load_settings()
+
+    def set_prefs(self, data):
+        clean = {k: v for k, v in (data or {}).items() if k in ALLOWED_PREFS}
+        return updater.save_settings(clean)
+
+    def reset_prefs(self):
+        keep = {"auto_update": updater.load_settings().get("auto_update", True)}
+        defaults = dict(updater.DEFAULT_SETTINGS)
+        defaults.update(keep)
+        return updater.save_settings(defaults)
+
     # ---------- aggiornamento dell'app ----------
     def get_app_info(self):
-        s = updater.load_settings()
-        return {"version": updater.app_version(), "auto_update": s.get("auto_update", True),
-                "configured": bool(updater.GITHUB_REPO), "repo": updater.GITHUB_REPO,
-                "frozen": updater.IS_FROZEN}
+        return {"version": updater.app_version(), "configured": bool(updater.GITHUB_REPO),
+                "repo": updater.GITHUB_REPO, "frozen": updater.IS_FROZEN, "update": self._public_update()}
 
-    def set_auto_update(self, enabled):
-        updater.save_settings({"auto_update": bool(enabled)})
-        return {"ok": True, "msg": "Aggiornamento automatico " + ("attivato." if enabled else "disattivato.")}
+    def _public_update(self):
+        return {k: v for k, v in self._update.items() if k != "path"}
 
-    def check_app_update(self):
-        return updater.check_for_update()
+    def prepare_update(self):
+        """Controlla GitHub e, se c'è una versione nuova, la scarica in silenzio."""
+        with self._update_lock:
+            if self._update["status"] in ("checking", "ready"):
+                return self._public_update()
+            self._update = {"status": "checking"}
+        r = updater.check_for_update()
+        if not r["ok"]:
+            self._update = {"status": "error", "msg": r["msg"]}
+        elif not r["available"]:
+            self._update = {"status": "none", "msg": r["msg"], "latest": r.get("latest")}
+        elif not updater.IS_FROZEN:
+            self._update = {"status": "source", "latest": r["latest"], "notes": r.get("notes", ""),
+                            "msg": f"C'è la versione {r['latest']}: scaricala da GitHub."}
+        else:
+            d = updater.download_update(r["url"], r.get("size", 0))
+            if d["ok"]:
+                self._update = {"status": "ready", "latest": r["latest"], "notes": r.get("notes", ""),
+                                "path": d["path"], "msg": f"Versione {r['latest']} pronta."}
+            else:
+                self._update = {"status": "error", "msg": d["msg"]}
+        return self._public_update()
 
-    def install_app_update(self, url, size=0):
-        r = updater.install_update(url, size)
+    def apply_update_now(self):
+        if self._update.get("status") != "ready":
+            return {"ok": False, "msg": "Nessun aggiornamento pronto."}
+        r = updater.apply_update(self._update["path"], restart=True)
         if r["ok"]:
-            threading.Timer(1.5, lambda: [w.destroy() for w in list(webview.windows)]).start()
+            self._update["status"] = "applied"
+            import webview
+            threading.Timer(1.0, lambda: [w.destroy() for w in list(webview.windows)]).start()
         return r
+
+    def on_close(self):
+        """Alla chiusura: se un aggiornamento è pronto, lo installa (senza riaprire l'app)."""
+        if self._update.get("status") == "ready" and updater.load_settings().get("auto_update", True):
+            updater.apply_update(self._update["path"], restart=False)
 
     def restart_as_admin(self):
         if relaunch_as_admin():
-            for w in webview.windows:
+            import webview
+            for w in list(webview.windows):
                 w.destroy()
             return True
         return False
 
 
 def main():
-    # Chiede subito i permessi di amministratore (servono per driver, aggiornamenti e pulizia di sistema)
+    # Pulizia programmata: nessuna finestra, pulisce e chiude
+    if "--auto-clean" in sys.argv:
+        Api().auto_clean()
+        return
+
+    # Chiede i permessi di amministratore (servono per driver, aggiornamenti e pulizia di sistema)
     if IS_WINDOWS and not is_admin() and "--no-admin" not in sys.argv:
         if relaunch_as_admin():
             sys.exit(0)
-        # se l'utente ha rifiutato la finestra UAC, l'app parte comunque in modalità limitata
 
-    webview.create_window(
+    import webview
+    api = AppApi()
+    prefs = updater.load_settings()
+    bg = {"light": "#eef0f5", "amoled": "#000000"}.get(prefs.get("theme"), "#111319")
+    window = webview.create_window(
         "PC Booster",
         resource_path(os.path.join("ui", "index.html")),
-        js_api=AppApi(),
-        width=1180, height=760, min_size=(980, 640),
-        background_color="#0b0d12",
+        js_api=api,
+        width=1220, height=780, min_size=(1000, 660),
+        background_color=bg,
     )
+    window.events.closed += api.on_close
     webview.start()
 
 

@@ -4,8 +4,8 @@ PC Booster - aggiornamento automatico dell'app.
 Come funziona:
 1. Tu pubblichi una nuova release su GitHub: GitHub crea PCBooster.exe e lo allega.
 2. All'avvio, l'app di ogni PC chiede a GitHub qual è l'ultima versione.
-3. Se è più nuova di quella installata, scarica il nuovo .exe, chiude sé stessa,
-   sostituisce il file e si riapre già aggiornata.
+3. Se è più nuova, la scarica in silenzio e la installa quando chiudi l'app
+   (oppure subito, se premi "Aggiorna ora" nelle Impostazioni).
 """
 import os
 import sys
@@ -48,6 +48,14 @@ def _parse(v: str):
 
 
 # ---------------- impostazioni (salvate in %APPDATA%\PCBooster) ----------------
+DEFAULT_SETTINGS = {
+    "auto_update": True,
+    # aspetto
+    "theme": "dark", "accent": "#8b7bff", "font": "barlow", "font_size": "normal", "radius": "medium",
+    "compact_sidebar": False, "animations": True, "glow": True, "start_page": "home",
+    # sicurezza
+    "restore_before_optimize": True,
+}
 def _settings_path():
     base = os.environ.get("APPDATA") or os.path.expanduser("~")
     folder = os.path.join(base, "PCBooster")
@@ -56,7 +64,7 @@ def _settings_path():
 
 
 def load_settings():
-    defaults = {"auto_update": True}
+    defaults = dict(DEFAULT_SETTINGS)
     try:
         with open(_settings_path(), encoding="utf-8") as f:
             defaults.update(json.load(f))
@@ -103,13 +111,12 @@ def check_for_update():
     }
 
 
-def install_update(url: str, expected_size: int = 0):
-    """Scarica il nuovo .exe e prepara la sostituzione. Dopo questa chiamata l'app va chiusa."""
+def download_update(url: str, expected_size: int = 0):
+    """Scarica il nuovo .exe in una cartella temporanea. Non tocca ancora l'app installata."""
     if not IS_FROZEN:
-        return {"ok": False, "msg": "Stai usando la versione da sorgente: scarica i file nuovi da GitHub."}
+        return {"ok": False, "msg": "Stai usando la versione da sorgente: gli aggiornamenti arrivano solo all'exe."}
     if not url or not url.lower().startswith(f"https://github.com/{GITHUB_REPO}/releases/download/".lower()):
         return {"ok": False, "msg": "Indirizzo di download non valido."}
-    target = sys.executable
     tmp_dir = tempfile.mkdtemp(prefix="pcbooster_")
     new_exe = os.path.join(tmp_dir, "PC Booster.new.exe")
     try:
@@ -122,10 +129,18 @@ def install_update(url: str, expected_size: int = 0):
     size = os.path.getsize(new_exe)
     if size < 1_000_000 or (expected_size and size != expected_size):
         return {"ok": False, "msg": "Il file scaricato è incompleto. Riprova più tardi."}
+    return {"ok": True, "path": new_exe, "msg": "Aggiornamento scaricato."}
 
-    # Script che aspetta la chiusura dell'app, sostituisce l'exe e la riapre
+
+def apply_update(new_exe: str, restart: bool = True):
+    """Sostituisce l'exe appena l'app si chiude. Con restart=True la riapre subito dopo."""
+    if not IS_FROZEN or not new_exe or not os.path.isfile(new_exe):
+        return {"ok": False, "msg": "Nessun aggiornamento pronto."}
+    target = sys.executable
+    tmp_dir = os.path.dirname(new_exe)
     bat = os.path.join(tmp_dir, "aggiorna.bat")
     pid = os.getpid()
+    reopen = f'start "" "{target}"' if restart else "rem"
     with open(bat, "w", encoding="mbcs" if os.name == "nt" else "utf-8") as f:
         f.write(f"""@echo off
 :aspetta
@@ -137,8 +152,15 @@ if errorlevel 1 (
   set /a tentativi+=1
   if %tentativi% lss 20 (timeout /t 1 /nobreak >nul & goto sostituisci)
 )
-start "" "{target}"
+{reopen}
 (goto) 2>nul & rmdir /s /q "{tmp_dir}"
 """)
     subprocess.Popen(["cmd", "/c", bat], creationflags=CREATE_NO_WINDOW | DETACHED_PROCESS, close_fds=True)
-    return {"ok": True, "msg": "Aggiornamento scaricato: l'app si riapre tra qualche secondo."}
+    return {"ok": True, "msg": "L'app si riapre aggiornata tra qualche secondo." if restart
+            else "L'aggiornamento verrà installato alla chiusura."}
+
+
+def install_update(url: str, expected_size: int = 0):
+    """Scarica e installa subito (l'app va chiusa dopo questa chiamata)."""
+    r = download_update(url, expected_size)
+    return apply_update(r["path"], True) if r["ok"] else r
