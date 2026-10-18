@@ -600,7 +600,7 @@ function renderAppUpdate(u, info) {
   const status = u ? u.status : 'idle';
   $('#updDot').hidden = status !== 'ready';
   if (status === 'ready') {
-    p.append(h('b', null, `Versione ${u.latest} pronta. `), 'Si installa da sola quando chiudi PC Booster, oppure subito con il pulsante.');
+    p.append(h('b', null, `Versione ${u.latest} pronta. `), 'Si installa quando chiudi PC Booster: la prossima volta che lo apri sarà già aggiornato. Oppure premi il pulsante e si riapre da solo.');
     box.append(p);
     const b = h('button', 'btn primary small', 'Aggiorna ora'); b.onclick = () => busy(b, async () => { const r = await api.apply_update_now(); toast(r.msg, r.ok); }); box.append(b);
     if (u.notes) box.append(h('p', null, 'Novità: ' + u.notes));
@@ -610,6 +610,8 @@ function renderAppUpdate(u, info) {
   else { p.append(info && !info.configured ? 'Gli aggiornamenti funzionano nella versione scaricata da GitHub.' : 'Nessun controllo fatto finora.'); box.append(p); }
 }
 async function initAppUpdate() {
+  const info = await api.get_app_info();
+  if (info.just_updated) toast(`PC Booster aggiornato alla versione ${info.version}.`);
   if (state.prefs.auto_update === false) return;
   const u = await api.prepare_update();
   $('#updDot').hidden = u.status !== 'ready';

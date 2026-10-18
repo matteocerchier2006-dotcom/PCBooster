@@ -57,6 +57,7 @@ DEFAULT_SETTINGS = {
     "restore_before_optimize": True,
     # avvio senza richiesta dei permessi (attività di Windows + collegamento sul desktop)
     "no_uac_prompt": True,
+    "last_version": "",
     # modalità partita (gestite dall'app, non dalle preferenze dell'interfaccia)
     "game_mode_state": None,
     "game_mode_opts": {"power": True, "ram": True, "close": True, "reopen": True},
@@ -138,50 +139,86 @@ def download_update(url: str, expected_size: int = 0):
     return {"ok": True, "path": new_exe, "msg": "Aggiornamento scaricato."}
 
 
-def _pids_to_wait():
-    """L'exe di PyInstaller è fatto di due processi (avvio + app): bisogna aspettare che finiscano entrambi."""
-    pids = [os.getpid()]
+def log(msg):
+    """Diario degli aggiornamenti: %APPDATA%\\PCBooster\\aggiornamenti.log (utile se qualcosa va storto)."""
     try:
-        import psutil
-        parent = psutil.Process(os.getpid()).parent()
-        if parent and os.path.normcase(parent.exe()) == os.path.normcase(sys.executable):
-            pids.append(parent.pid)
-    except Exception:
+        import time
+        path = os.path.join(os.path.dirname(_settings_path()), "aggiornamenti.log")
+        if os.path.exists(path) and os.path.getsize(path) > 200_000:
+            os.remove(path)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + str(msg) + "\n")
+    except OSError:
         pass
-    return pids
+
+
+def cleanup_old_versions():
+    """All'avvio: elimina le copie vecchie lasciate dall'ultimo aggiornamento."""
+    if not IS_FROZEN:
+        return
+    import glob
+    for old in glob.glob(sys.executable + "*.old"):
+        try:
+            os.remove(old)
+            log(f"Eliminata la versione vecchia {old}")
+        except OSError:
+            pass
+
+
+def relaunch():
+    """Riapre l'app dopo 3 secondi (così la finestra vecchia ha il tempo di chiudersi)."""
+    import launcher
+    target = sys.executable
+    if launcher.task_exists():
+        run = f'schtasks /Run /TN "{launcher.TASK}"'
+    else:
+        run = f'start "" "{target}"'
+    cmd = f"ping -n 4 127.0.0.1 >nul & {run}"
+    for flags in (CREATE_NO_WINDOW | DETACHED_PROCESS | 0x01000000, CREATE_NO_WINDOW | DETACHED_PROCESS):
+        try:   # 0x01000000 = esci dal "gruppo" dell'app, così Windows non lo chiude insieme a lei
+            subprocess.Popen(["cmd", "/c", cmd], creationflags=flags, close_fds=True)
+            log("Riavvio programmato")
+            return True
+        except OSError as e:
+            log(f"Riavvio non riuscito con flag {flags}: {e}")
+    return False
 
 
 def apply_update(new_exe: str, restart: bool = True):
-    """Sostituisce l'exe appena l'app si chiude. Con restart=True la riapre subito dopo."""
+    """Mette subito la versione nuova al posto di quella in uso.
+
+    Windows non permette di cancellare un programma aperto, ma permette di rinominarlo:
+    1) PCBooster.exe (in uso)  ->  PCBooster.exe.<numero>.old
+    2) versione nuova          ->  PCBooster.exe
+    La copia .old viene eliminata al prossimo avvio.
+    """
     if not IS_FROZEN or not new_exe or not os.path.isfile(new_exe):
         return {"ok": False, "msg": "Nessun aggiornamento pronto."}
-    import launcher
+    import time
+    import shutil
     target = sys.executable
-    tmp_dir = os.path.dirname(new_exe)
-    bat = os.path.join(tmp_dir, "aggiorna.bat")
-    waits = "\n".join(
-        f':aspetta{i}\ntasklist /FI "PID eq {pid}" 2>nul | find " {pid} " >nul && (ping -n 2 127.0.0.1 >nul & goto aspetta{i})'
-        for i, pid in enumerate(_pids_to_wait()))
-    reopen = launcher.relaunch_command(target) if restart else "rem"
-    # Nota: "ping" fa da pausa perché "timeout" non funziona in uno script senza finestra
-    with open(bat, "w", encoding="mbcs" if os.name == "nt" else "utf-8") as f:
-        f.write(f"""@echo off
-{waits}
-set /a n=0
-:sostituisci
-move /y "{new_exe}" "{target}" >nul 2>&1
-if not errorlevel 1 goto fatto
-set /a n+=1
-if %n% geq 90 goto fatto
-ping -n 2 127.0.0.1 >nul
-goto sostituisci
-:fatto
-{reopen}
-(goto) 2>nul & rmdir /s /q "{tmp_dir}"
-""")
-    subprocess.Popen(["cmd", "/c", bat], creationflags=CREATE_NO_WINDOW | DETACHED_PROCESS, close_fds=True)
-    return {"ok": True, "msg": "L'app si riapre aggiornata tra qualche secondo." if restart
-            else "L'aggiornamento verrà installato alla chiusura."}
+    old = f"{target}.{int(time.time())}.old"
+    log(f"Aggiornamento: {new_exe} -> {target}")
+    try:
+        os.replace(target, old)
+    except OSError as e:
+        log(f"Non riesco a rinominare l'app in uso: {e}")
+        return {"ok": False, "msg": "Non riesco a sostituire l'app: riprova oppure scarica la versione nuova da GitHub."}
+    try:
+        shutil.move(new_exe, target)
+    except Exception as e:
+        log(f"Non riesco a spostare la versione nuova: {e}")
+        try:
+            os.replace(old, target)   # rimette tutto com'era
+        except OSError as e2:
+            log(f"ATTENZIONE, ripristino non riuscito: {e2}")
+        return {"ok": False, "msg": "Non riesco a sostituire l'app: riprova oppure scarica la versione nuova da GitHub."}
+    shutil.rmtree(os.path.dirname(new_exe), ignore_errors=True)
+    log("Versione nuova installata")
+    if restart:
+        relaunch()
+        return {"ok": True, "msg": "Aggiornato: l'app si riapre tra qualche secondo."}
+    return {"ok": True, "msg": "Aggiornato: la prossima volta che apri PC Booster avrai la versione nuova."}
 
 
 def install_update(url: str, expected_size: int = 0):

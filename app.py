@@ -29,6 +29,12 @@ class AppApi(Api):
         super().__init__()
         self._update = {"status": "idle"}   # idle | checking | none | ready | error
         self._update_lock = threading.Lock()
+        # Mostra "Aggiornato alla versione X" la prima volta dopo un aggiornamento
+        last = updater.load_settings().get("last_version", "")
+        now = updater.app_version()
+        self._just_updated = bool(last) and last != now
+        if last != now:
+            updater.save_settings({"last_version": now})
 
     # ---------- preferenze (aspetto, opzioni) ----------
     def get_prefs(self):
@@ -47,6 +53,7 @@ class AppApi(Api):
     # ---------- aggiornamento dell'app ----------
     def get_app_info(self):
         return {"version": updater.app_version(), "configured": bool(updater.GITHUB_REPO),
+                "just_updated": self._just_updated,
                 "repo": updater.GITHUB_REPO, "frozen": updater.IS_FROZEN, "update": self._public_update()}
 
     def _public_update(self):
@@ -86,9 +93,10 @@ class AppApi(Api):
         return r
 
     def on_close(self):
-        """Alla chiusura: se un aggiornamento è pronto, lo installa (senza riaprire l'app)."""
+        """Alla chiusura: se un aggiornamento è pronto, lo installa (la prossima apertura è già aggiornata)."""
         if self._update.get("status") == "ready" and updater.load_settings().get("auto_update", True):
             updater.apply_update(self._update["path"], restart=False)
+            self._update["status"] = "applied"
 
     # ---------- modalità partita ----------
     def get_game_mode(self):
@@ -141,6 +149,7 @@ def main():
             sys.exit(0)
 
     import webview
+    updater.cleanup_old_versions()
     api = AppApi()
     prefs = updater.load_settings()
     # Tiene aggiornati attività e collegamento (anche se l'exe è stato spostato)
