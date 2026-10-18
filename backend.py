@@ -13,6 +13,8 @@ import subprocess
 import threading
 
 from cleaner import Cleaner, human_size
+import drivers
+import apptools
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -169,6 +171,8 @@ class Api:
         self._startup_cache = []
         self._lock = threading.Lock()
         self.cleaner = Cleaner()
+        self.driver_dl = drivers.DriverDownloader()
+        self._gpus = None
 
     # ================= Panoramica =================
     def get_system_info(self):
@@ -316,6 +320,10 @@ class Api:
             return None
 
     def get_gpu_info(self):
+        self._gpus = self._read_gpus()
+        return self._gpus
+
+    def _read_gpus(self):
         if not IS_WINDOWS:
             return DEMO["gpus"]
         rows = run_ps_json(
@@ -375,6 +383,51 @@ class Api:
             })
         gpus.sort(key=lambda g: g["kind"] != "Dedicata")
         return gpus
+
+    # ---------- ultimo driver (NVIDIA / AMD) ----------
+    def check_gpu_driver(self, name):
+        gpus = self._gpus or self.get_gpu_info()
+        gpu = next((g for g in gpus if g["name"] == name), None)
+        if not gpu:
+            return {"ok": False, "msg": "Scheda video non trovata."}
+        if not IS_WINDOWS:
+            if gpu["vendor"] == "nvidia":
+                return {"ok": True, "version": "581.57", "installed": gpu["driver_version"], "update": True,
+                        "date": "Tue Oct 14, 2026", "name": "GeForce Game Ready Driver", "size": "866.3 MB",
+                        "url": "https://us.download.nvidia.com/Windows/581.57/581.57-desktop-win10-win11-64bit-international-dch-whql.exe"}
+            return {"ok": True, "version": "26.8.1", "installed": "24.9.1", "update": True, "date": "2026-08-20",
+                    "name": "AMD Software: Adrenalin Edition", "size": "",
+                    "url": "https://drivers.amd.com/drivers/whql-amd-software-adrenalin-edition-26.8.1-win11-c.exe"}
+        return drivers.check_latest(gpu)
+
+    def download_driver(self, url, vendor):
+        if not IS_WINDOWS:
+            import time as _t
+            def fake():
+                self.driver_dl.state = {"status": "downloading", "done": 0, "total": 866_000_000}
+                for i in range(1, 11):
+                    _t.sleep(0.35)
+                    self.driver_dl.state["done"] = 86_600_000 * i
+                self.driver_dl.state = {"status": "launched", "msg": "Demo: installazione avviata."}
+            threading.Thread(target=fake, daemon=True).start()
+            return {"ok": True}
+        return self.driver_dl.start(url, vendor)
+
+    def driver_progress(self):
+        return self.driver_dl.progress()
+
+    # ---------- aggiornamento app (winget) ----------
+    def list_app_updates(self):
+        return apptools.list_app_updates()
+
+    def upgrade_app(self, pkg_id):
+        return apptools.upgrade_app(pkg_id)
+
+    def open_winget_store(self):
+        return apptools.open_winget_store()
+
+    def running_apps(self):
+        return apptools.running_apps()
 
     def get_gpu_live(self):
         """Temperatura, utilizzo e memoria della scheda video in tempo reale."""

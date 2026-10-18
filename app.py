@@ -12,9 +12,10 @@ import threading
 
 import updater
 import launcher
+import apptools
 from backend import Api, is_admin, relaunch_as_admin, IS_WINDOWS
 
-ALLOWED_PREFS = set(updater.DEFAULT_SETTINGS)
+ALLOWED_PREFS = set(updater.DEFAULT_SETTINGS) - {"game_mode_state", "game_mode_opts", "game_mode_close"}
 
 
 def resource_path(rel: str) -> str:
@@ -88,6 +89,31 @@ class AppApi(Api):
         """Alla chiusura: se un aggiornamento è pronto, lo installa (senza riaprire l'app)."""
         if self._update.get("status") == "ready" and updater.load_settings().get("auto_update", True):
             updater.apply_update(self._update["path"], restart=False)
+
+    # ---------- modalità partita ----------
+    def get_game_mode(self):
+        s = updater.load_settings()
+        state = s.get("game_mode_state")
+        apps = [] if state else apptools.running_apps()
+        remember = s.get("game_mode_close")
+        if remember is not None:
+            for a in apps:
+                a["suggest"] = a["exe"] in remember
+        return {"state": state, "opts": s.get("game_mode_opts"), "apps": apps}
+
+    def start_game_mode(self, opts, close_names):
+        opts = {k: bool(v) for k, v in (opts or {}).items() if k in ("power", "ram", "close", "reopen")}
+        names = [n for n in (close_names or []) if isinstance(n, str)]
+        state = apptools.start_game_mode(opts, names)
+        updater.save_settings({"game_mode_state": state, "game_mode_opts": opts, "game_mode_close": names})
+        return state
+
+    def stop_game_mode(self):
+        s = updater.load_settings()
+        state = s.get("game_mode_state") or {}
+        r = apptools.stop_game_mode(state, (s.get("game_mode_opts") or {}).get("reopen", True))
+        updater.save_settings({"game_mode_state": None})
+        return r
 
     # ---------- avvio senza richiesta dei permessi ----------
     def set_no_uac(self, enabled):

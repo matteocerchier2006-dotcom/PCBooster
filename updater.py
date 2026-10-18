@@ -57,6 +57,10 @@ DEFAULT_SETTINGS = {
     "restore_before_optimize": True,
     # avvio senza richiesta dei permessi (attività di Windows + collegamento sul desktop)
     "no_uac_prompt": True,
+    # modalità partita (gestite dall'app, non dalle preferenze dell'interfaccia)
+    "game_mode_state": None,
+    "game_mode_opts": {"power": True, "ram": True, "close": True, "reopen": True},
+    "game_mode_close": None,
 }
 def _settings_path():
     base = os.environ.get("APPDATA") or os.path.expanduser("~")

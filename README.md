@@ -4,11 +4,13 @@ App per Windows 10/11 che tiene in forma il PC: driver della scheda video, aggio
 
 ## Cosa fa
 
+- **Modalità partita**: prima di giocare attiva Prestazioni elevate, libera la RAM e chiude le app scelte; alla fine rimette tutto com'era.
 - **Panoramica**: voto da 0 a 100 sullo stato del PC, specifiche, uso di CPU, RAM e disco, e la lista di cosa sistemare.
 - **Pulizia**: temporanei, Windows Update, report e dump di errore, log, cache di Chrome/Edge/Brave/Firefox/Zen/Opera/Vivaldi, Discord, Spotify, Steam, Epic, cache shader e pulizia profonda (componenti di Windows, Windows.old).
 - **Spazio su disco**: dischi (SSD/HDD) e ricerca dei file grandi, con spostamento nel Cestino.
 - **Scheda video**: versione driver come la mostra il produttore, memoria video reale, schermo, temperatura e utilizzo in tempo reale (NVIDIA), ottimizzazioni per i giochi.
-- **Aggiornamenti**: processore, scheda madre, BIOS e Windows Update (driver e sistema).
+- **Aggiornamenti**: processore, scheda madre, BIOS, Windows Update e aggiornamento di tutti i programmi con winget.
+- **Driver NVIDIA e AMD**: controlla online l'ultima versione, la scarica e apre l'installazione ufficiale.
 - **Avvio automatico** e **App e giochi**.
 - **Impostazioni**: temi, colori, caratteri, angoli, barra compatta; aggiornamento automatico; pulizia programmata; punto di ripristino.
 
@@ -28,6 +30,9 @@ GitHub crea da solo `PCBooster.exe` ogni volta che pubblichi una nuova release. 
 - `app.py`: apre la finestra
 - `backend.py`: tutte le operazioni sul PC (PowerShell, registro, Windows Update)
 - `cleaner.py`: pulizia e file grandi
+- `drivers.py`: ultimo driver NVIDIA e AMD
+- `apptools.py`: aggiornamento programmi (winget) e Modalità partita
+- `build.py` e `icon.ico`: creazione dell'exe con icona e versione (li usa GitHub)
 - `updater.py`: aggiornamento automatico dell'app e impostazioni
 - `launcher.py`: avvio senza la richiesta dei permessi
 - `ui/`: interfaccia (HTML, CSS, JavaScript)

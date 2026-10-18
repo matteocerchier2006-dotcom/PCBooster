@@ -17,6 +17,7 @@ async function ready() {
   loadHome();
   loadTweaks();
   initAppUpdate();
+  api.get_game_mode().then(g => { $('#gameDot').hidden = !g.state; });
 }
 if (window.pywebview && window.pywebview.api) ready();
 else window.addEventListener('pywebviewready', ready);
@@ -127,6 +128,7 @@ function go(view) {
   if (view === 'startup') loadStartup();
   if (view === 'apps' && !state.apps.length) loadApps();
   if (view === 'settings') loadSettingsView();
+  if (view === 'game') loadGame();
 }
 
 // ================= Panoramica =================
@@ -180,11 +182,16 @@ async function runCheckup() {
     tw: addFinding('pending', 'Controllo le impostazioni per i giochi…'),
     st: addFinding('pending', 'Controllo i programmi all\'avvio…'),
     upd: addFinding('pending', 'Chiedo a Windows Update se ci sono driver e aggiornamenti…'),
+    wg: addFinding('pending', 'Controllo se i tuoi programmi sono aggiornati…'),
   };
 
   const gpus = await api.get_gpu_info(); state.gpus = gpus;
+  const main = gpus.find(g => (g.vendor === 'nvidia' || g.vendor === 'amd') && (g.kind === 'Dedicata' || gpus.length === 1));
+  const dr = main ? await checkDriver(main, true) : null;
   const old = gpus.filter(g => g.status === 'warn' && g.kind === 'Dedicata');
-  if (old.length) { penalty += 10; fillFinding(steps.gpu, 'warn', `Driver di ${old[0].name} di ${old[0].age_days} giorni fa`, 'Probabilmente ne è uscito uno più nuovo, con miglioramenti per i giochi recenti.', 'Vai al driver', () => go('gpu')); }
+  if (dr && dr.ok && dr.update) { penalty += 10; fillFinding(steps.gpu, 'warn', `Nuovo driver per ${main.name}: ${dr.version}`, `Tu hai il ${dr.installed}. I driver nuovi migliorano le prestazioni nei giochi recenti.`, 'Installa', () => go('gpu')); }
+  else if (dr && dr.ok && !dr.unknown_installed) fillFinding(steps.gpu, 'ok', 'Hai l\'ultimo driver della scheda video', `${main.name} · ${dr.version}`);
+  else if (old.length) { penalty += 10; fillFinding(steps.gpu, 'warn', `Driver di ${old[0].name} di ${old[0].age_days} giorni fa`, 'Probabilmente ne è uscito uno più nuovo, con miglioramenti per i giochi recenti.', 'Vai al driver', () => go('gpu')); }
   else fillFinding(steps.gpu, 'ok', 'Driver della scheda video recente', gpus.filter(g => g.kind === 'Dedicata').map(g => `${g.name} · ${g.driver_version}`).join(', ') || gpus.map(g => g.name).join(', '));
 
   const junk = await api.scan_junk(); state.junk = junk; renderJunk();
@@ -218,6 +225,13 @@ async function runCheckup() {
     const drv = r.updates.filter(u => u.category !== 'system').length;
     if (r.updates.length) { penalty += 8 + drv * 3; fillFinding(steps.upd, 'warn', `${r.updates.length} ${plural(r.updates.length, 'aggiornamento disponibile', 'aggiornamenti disponibili')}` + (drv ? `, di cui ${drv} driver` : ''), r.updates.slice(0, 2).map(u => u.title).join(' — '), 'Installa', () => go('updates')); }
     else fillFinding(steps.upd, 'ok', 'Windows e i driver sono aggiornati', 'Nessun aggiornamento in sospeso.');
+  }
+  const wg = await api.list_app_updates();
+  if (!wg.ok) fillFinding(steps.wg, 'warn', 'Non riesco a controllare i programmi', wg.msg);
+  else {
+    state.wg = wg.apps; renderWinget();
+    if (wg.apps.length) { penalty += Math.min(10, wg.apps.length * 2); fillFinding(steps.wg, 'warn', `${wg.apps.length} ${plural(wg.apps.length, 'programma da aggiornare', 'programmi da aggiornare')}`, wg.apps.slice(0, 4).map(a => a.name).join(', ') + (wg.apps.length > 4 ? '…' : ''), 'Aggiorna', () => go('updates')); }
+    else fillFinding(steps.wg, 'ok', 'Tutti i programmi sono aggiornati', 'Nessuna versione nuova da installare.');
   }
   setScore(Math.max(0, Math.min(100, 100 - penalty)));
 }
@@ -376,19 +390,83 @@ function renderGpu() {
     if (g.display) cell('Schermo', g.display);
     c.append(head, det);
     if (g.live) { const live = h('div', 'live'); live.id = 'gpuLive'; c.append(live); }
+    const online = (g.vendor === 'nvidia' || g.vendor === 'amd') && (g.kind === 'Dedicata' || state.gpus.length === 1);
+    if (online) { const d = h('div', 'drv'); d.dataset.gpu = g.name; c.append(d); paintDriver(g, d); }
     const v = h('div', 'verdict'), p = h('p');
-    if (g.status === 'warn') { p.append(h('b', null, 'Driver di più di 6 mesi fa. ')); p.append('Probabilmente ne è uscito uno più nuovo: scaricalo dal produttore.'); }
-    else if (g.status === 'ok') { p.append(h('b', null, 'Driver recente. ')); p.append('Controlla ogni tanto: escono versioni nuove per i giochi appena usciti.'); }
-    else p.textContent = 'Non riesco a leggere la data del driver.';
+    if (!online) {
+      if (g.status === 'warn') { p.append(h('b', null, 'Driver di più di 6 mesi fa. ')); p.append('Probabilmente ne è uscito uno più nuovo: scaricalo dal produttore.'); }
+      else if (g.status === 'ok') { p.append(h('b', null, 'Driver recente. ')); p.append('Controlla ogni tanto: escono versioni nuove per i giochi appena usciti.'); }
+      else p.textContent = 'Non riesco a leggere la data del driver.';
+    } else p.textContent = 'Puoi anche usare l\'app ufficiale del produttore.';
     v.append(p);
     if (g.vendor !== 'altro' && (g.kind === 'Dedicata' || idx === 0)) {
       const appBtn = h('button', 'btn', 'Apri app ' + ({ nvidia: 'NVIDIA', amd: 'AMD', intel: 'Intel' })[g.vendor]);
       appBtn.onclick = async () => { const r = await api.open_vendor_app(g.vendor); toast(r.msg, r.ok); if (!r.ok) api.open_url(g.download_page); };
-      const site = h('button', 'btn primary', 'Scarica l\'ultimo driver'); site.onclick = () => api.open_url(g.download_page);
+      const site = h('button', 'btn', 'Sito del produttore'); site.onclick = () => api.open_url(g.download_page);
       v.append(appBtn, site);
     }
     c.append(v); box.append(c);
   });
+}
+
+// ---------- ultimo driver (NVIDIA e AMD) ----------
+state.drv = {};
+async function checkDriver(g, force = false) {
+  if (!force && state.drv[g.name]) return state.drv[g.name];
+  const r = await api.check_gpu_driver(g.name);
+  state.drv[g.name] = r; return r;
+}
+async function paintDriver(g, box) {
+  box.innerHTML = ''; box.append(h('p', null, 'Controllo online l\'ultima versione del driver…'));
+  const r = await checkDriver(g);
+  box.innerHTML = '';
+  const p = h('p');
+  if (!r.ok) {
+    p.append(r.msg || 'Non riesco a controllare online.');
+    const again = h('button', 'btn small', 'Riprova'); again.onclick = () => { delete state.drv[g.name]; paintDriver(g, box); };
+    box.append(p, again); return;
+  }
+  const when = r.date ? ` del ${fmtDate(r.date)}` : '';
+  if (r.update) {
+    p.append(h('b', null, `È uscito il driver ${r.version}${when}. `), `Tu hai il ${r.installed}.` + (r.size ? ` Download: ${r.size}.` : ''));
+    const dl = h('button', 'btn primary', 'Scarica e installa');
+    dl.onclick = () => startDriverDownload(g, r, box);
+    box.append(p, dl);
+  } else if (r.unknown_installed) {
+    p.append(h('b', null, `Ultima versione: ${r.version}${when}. `), 'Non riesco a leggere la tua versione per confrontarla.');
+    const dl = h('button', 'btn', 'Scarica e installa'); dl.onclick = () => startDriverDownload(g, r, box);
+    box.append(p, dl);
+  } else {
+    box.classList.add('okbox');
+    p.append(h('b', null, 'Hai già l\'ultimo driver. '), `Versione ${r.version}${when}.`);
+    box.append(p);
+  }
+}
+function fmtDate(s) {
+  const d = new Date(s); if (isNaN(d)) return s;
+  return d.toLocaleDateString('it-IT', { day: 'numeric', month: 'long', year: 'numeric' });
+}
+async function startDriverDownload(g, r, box) {
+  const ok = await confirmBox(`Installare il driver ${r.version}?`, 'Lo scarico dal sito ufficiale ' + (g.vendor === 'nvidia' ? 'NVIDIA' : 'AMD') +
+    ' e poi si apre l\'installazione del produttore: segui le sue schermate. Durante l\'installazione lo schermo può diventare nero per qualche secondo: è normale.', 'Scarica');
+  if (!ok) return;
+  const s = await api.download_driver(r.url, g.vendor);
+  if (!s.ok) return toast(s.msg, false);
+  box.innerHTML = '';
+  const p = h('p', null, 'Download in corso…'), bar = h('div', 'bar'), em = h('em'); bar.append(em);
+  box.append(p, bar);
+  const t = setInterval(async () => {
+    const st = await api.driver_progress();
+    if (st.status === 'downloading') {
+      const pct = st.total ? Math.round(st.done / st.total * 100) : 0;
+      em.style.width = pct + '%';
+      p.textContent = `Download in corso: ${fmtBytes(st.done)}` + (st.total ? ` di ${fmtBytes(st.total)} (${pct}%)` : '');
+    } else {
+      clearInterval(t);
+      if (st.status === 'launched') { em.style.width = '100%'; p.textContent = st.msg; toast(st.msg); }
+      else if (st.status === 'error') { p.textContent = st.msg; toast(st.msg, false); }
+    }
+  }, 700);
 }
 let gpuTimer;
 function startGpuLive() {
@@ -543,3 +621,104 @@ $('#appUpdCheck').addEventListener('click', e => busy(e.currentTarget, async () 
 }));
 $('#rpCreate').addEventListener('click', e => busy(e.currentTarget, async () => { const r = await api.create_restore_point(); toast(r.msg, r.ok); }));
 $('#rpOpen').addEventListener('click', () => api.open_system_restore());
+
+
+// ================= Programmi da aggiornare (winget) =================
+$('#wgCheck').addEventListener('click', e => busy(e.currentTarget, async () => {
+  $('#wgArea').innerHTML = '<p class="empty">Controllo i programmi installati… può volerci un minuto.</p>';
+  const r = await api.list_app_updates();
+  if (!r.ok) {
+    $('#wgArea').innerHTML = ''; const p = h('p', 'empty', r.msg); $('#wgArea').append(p);
+    if (r.missing) { const b = h('button', 'btn small', 'Apri il Microsoft Store'); b.style.marginTop = '10px'; b.onclick = () => api.open_winget_store(); $('#wgArea').append(b); }
+    return;
+  }
+  state.wg = r.apps; renderWinget();
+}));
+function renderWinget() {
+  const area = $('#wgArea'); area.innerHTML = '';
+  if (!state.wg || !state.wg.length) { area.append(h('p', 'ok-line', 'Tutti i programmi sono aggiornati.')); return; }
+  const list = h('div');
+  state.wg.forEach(a => {
+    const row = h('label', 'wgrow'); row.dataset.id = a.id;
+    const cb = h('input', 'ck'); cb.type = 'checkbox'; cb.checked = true; cb.value = a.id;
+    const name = h('div'); name.append(h('b', null, a.name), h('span', 'meta', a.id));
+    const ver = h('span', 'ver'); ver.append(a.version + ' → ', h('b', null, a.available));
+    const st = h('span', 'st');
+    row.append(cb, name, ver, st); list.append(row);
+  });
+  area.append(list);
+  const bar = h('div', 'updbar'); bar.style.marginTop = '12px';
+  const btn = h('button', 'btn primary', 'Aggiorna selezionati');
+  bar.append(h('span', null, 'Chiudi i programmi prima di aggiornarli.'), btn);
+  btn.onclick = () => busy(btn, async () => {
+    const rows = $$('.wgrow', area).filter(r => $('input', r).checked && !r.dataset.done);
+    if (!rows.length) return toast('Seleziona almeno un programma.', false);
+    let ok = 0;
+    for (const r of rows) {
+      const st = $('.st', r); st.innerHTML = ''; st.append(h('span', 'tag acc', 'In corso…'));
+      const res = await api.upgrade_app(r.dataset.id);
+      st.innerHTML = '';
+      if (res.ok) { ok++; r.dataset.done = '1'; $('input', r).checked = false; $('input', r).disabled = true; st.append(h('span', 'tag ok', 'Aggiornato')); }
+      else { const t = h('span', 'tag warn', 'Non riuscito'); t.title = res.msg; st.append(t); }
+    }
+    toast(`${ok} su ${rows.length} ${plural(rows.length, 'programma aggiornato', 'programmi aggiornati')}.`, ok > 0);
+  });
+  area.append(bar);
+}
+
+// ================= Modalità partita =================
+let game = null;
+async function loadGame() {
+  game = await api.get_game_mode();
+  paintGame();
+}
+function paintGame() {
+  const on = !!game.state;
+  $('#gameDot').hidden = !on;
+  $('#gameHero').classList.toggle('on', on);
+  $('#gameState').textContent = on ? 'Attiva' : 'Spenta';
+  $('#gameSetup').hidden = on;
+  const btn = $('#gameBtn');
+  const text = $('#gameText'); text.innerHTML = '';
+  $$('.game-stats', $('#gameHero')).forEach(x => x.remove());
+  if (on) {
+    $('#gameTitle').textContent = 'Buona partita!';
+    text.textContent = `Attiva dalle ${game.state.since}. Quando hai finito premi Termina: rimetto tutto com'era.`;
+    const stats = h('div', 'game-stats');
+    const stat = (v, l) => { const d = h('div'); d.append(h('b', null, v), h('span', null, l)); stats.append(d); };
+    stat(fmtBytes(game.state.ram_freed || 0), 'RAM liberata');
+    stat(String((game.state.closed || []).length), 'app chiuse');
+    stat(game.state.prev_plan ? 'Sì' : 'No', 'prestazioni elevate');
+    text.after(stats);
+    btn.textContent = 'Termina modalità partita'; btn.className = 'btn big';
+  } else {
+    $('#gameTitle').textContent = 'Pronto a giocare?';
+    text.textContent = 'Scegli cosa fare qui sotto e premi il pulsante. Avviala prima di aprire il gioco.';
+    btn.textContent = 'Avvia modalità partita'; btn.className = 'btn primary big';
+    const opts = game.opts || {};
+    $$('[data-gm]').forEach(i => { i.checked = opts[i.dataset.gm] !== false; });
+    renderGameApps();
+  }
+}
+function renderGameApps() {
+  const list = $('#gameApps'); list.innerHTML = '';
+  if (!game.apps.length) { list.append(h('p', 'empty', 'Nessuna app pesante aperta: sei già pronto.')); return; }
+  game.apps.forEach(a => {
+    const row = h('label', 'lrow'); row.style.gridTemplateColumns = 'auto 38px 1fr auto'; row.style.cursor = 'pointer';
+    const cb = h('input', 'ck'); cb.type = 'checkbox'; cb.value = a.exe; cb.checked = a.suggest;
+    const name = h('div'); name.append(h('b', null, a.label), h('span', 'meta', a.exe));
+    row.append(cb, h('div', 'ico', a.label.charAt(0).toUpperCase()), name, h('div', 'num', fmtMB(a.mem_mb)));
+    list.append(row);
+  });
+}
+$('#gameRefresh').addEventListener('click', e => busy(e.currentTarget, loadGame));
+$('#gameBtn').addEventListener('click', e => busy(e.currentTarget, async () => {
+  if (game && game.state) {
+    const r = await api.stop_game_mode(); toast(r.msg, r.ok);
+  } else {
+    const opts = {}; $$('[data-gm]').forEach(i => opts[i.dataset.gm] = i.checked);
+    const names = $$('#gameApps input:checked').map(i => i.value);
+    const st = await api.start_game_mode(opts, names); toast(st.msg);
+  }
+  await loadGame();
+}));
