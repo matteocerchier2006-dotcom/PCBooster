@@ -7,13 +7,18 @@ App per Windows 10/11 che tiene in forma il PC: driver della scheda video, aggio
 - **Modalità partita**: prima di giocare attiva Prestazioni elevate, libera la RAM e chiude le app scelte; alla fine rimette tutto com'era.
 - **Panoramica**: voto da 0 a 100 sullo stato del PC, specifiche, uso di CPU, RAM e disco, e la lista di cosa sistemare.
 - **Pulizia**: temporanei, Windows Update, report e dump di errore, log, cache di Chrome/Edge/Brave/Firefox/Zen/Opera/Vivaldi, Discord, Spotify, Steam, Epic, cache shader e pulizia profonda (componenti di Windows, Windows.old).
-- **Spazio su disco**: dischi (SSD/HDD) e ricerca dei file grandi, con spostamento nel Cestino.
+- **Dischi**: spazio libero, salute di SSD e hard disk (stato, vita residua, temperatura, ore di accensione) e ricerca dei file grandi.
+- **Sicurezza**: Microsoft Defender (controllo veloce, completo e offline, definizioni, minacce e rimozione) e firewall.
 - **Scheda video**: versione driver come la mostra il produttore, memoria video reale, schermo, temperatura e utilizzo in tempo reale (NVIDIA), ottimizzazioni per i giochi.
 - **Aggiornamenti**: processore, scheda madre, BIOS, Windows Update e aggiornamento di tutti i programmi con winget.
 - **Driver NVIDIA e AMD**: controlla online l'ultima versione, la scarica e apre l'installazione ufficiale.
 - **Avvio automatico** e **App e giochi**.
 - **Icona vicino all'orologio**: resta attivo chiudendo la finestra, parte con Windows, manda notifiche (driver nuovo, aggiornamenti, spazio da liberare) e dal menu attiva Modalità partita e Pulizia veloce.
 - **Impostazioni**: temi, colori, caratteri, angoli, barra compatta; aggiornamento automatico; pulizia programmata; punto di ripristino.
+
+## Installazione
+
+Al primo avvio PC Booster si copia in `C:\Program Files\PC Booster` (cartella protetta) e crea i collegamenti sul desktop e nel menu Start. Si apre senza chiedere i permessi tramite l'attività di Windows "PC Booster - Avvio".
 
 ## Come funziona
 
@@ -37,5 +42,7 @@ GitHub crea da solo `PCBooster.exe` ogni volta che pubblichi una nuova release. 
 - `updater.py`: aggiornamento automatico dell'app e impostazioni
 - `launcher.py`: avvio senza la richiesta dei permessi
 - `tray.py`: icona vicino all'orologio, notifiche, una sola istanza
+- `installer.py`: installazione in Program Files e riparazione dei collegamenti
+- `security.py`: Microsoft Defender, firewall e salute dei dischi
 - `ui/`: interfaccia (HTML, CSS, JavaScript)
 - `.github/workflows/pubblica.yml`: istruzioni per GitHub su come creare l'exe

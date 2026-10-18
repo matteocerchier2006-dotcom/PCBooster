@@ -353,6 +353,45 @@ input:focus-visible + .sw { outline: 2px solid var(--accent); outline-offset: 2p
 .wgrow .st { min-width: 110px; text-align: right; font-size: .88em; }
 .wgrow .meta { color: var(--muted); font-size: .84em; display: block; }
 
+/* ================= Sicurezza ================= */
+.sec-hero { display: grid; grid-template-columns: auto 1fr; gap: 26px; align-items: center; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); padding: 24px 26px; box-shadow: var(--shadow); }
+.shield { width: 92px; height: 104px; display: grid; place-items: center; }
+.shield svg { width: 100%; height: 100%; }
+.shield path.body { fill: var(--ok-dim); stroke: var(--ok); stroke-width: 2.5; }
+.shield path.mark { fill: none; stroke: var(--ok); stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; }
+.sec-hero.warn .shield path.body { fill: var(--warn-dim); stroke: var(--warn); } .sec-hero.warn .shield path.mark { stroke: var(--warn); }
+.sec-hero.bad .shield path.body { fill: var(--bad-dim); stroke: var(--bad); } .sec-hero.bad .shield path.mark { stroke: var(--bad); }
+.sec-hero h2 { font-size: 1.6em; margin-bottom: 10px; }
+.checks { display: grid; gap: 8px; }
+.check { display: grid; grid-template-columns: 10px 1fr auto; gap: 12px; align-items: center; }
+.check .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); }
+.check.warn .dot { background: var(--warn); } .check.bad .dot { background: var(--bad); }
+.check span { color: var(--muted); } .check span b { color: var(--text); font-weight: 600; }
+.scan-options { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.scan-opt { text-align: left; background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-md); padding: 16px; cursor: pointer; transition: border-color var(--dur), transform .1s; }
+.scan-opt:hover { border-color: var(--accent-line); }
+.scan-opt:active { transform: translateY(1px); }
+.scan-opt b { display: block; font: 600 1.08em var(--head); margin-bottom: 4px; }
+.scan-opt span { color: var(--muted); font-size: .88em; }
+.scan-opt:first-child { border-color: var(--accent-line); background: var(--accent-dim); }
+.scan-box { margin-top: 14px; padding: 16px; border-radius: var(--r-md); background: var(--surface-2); display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.scan-box p { margin: 0; flex: 1 1 300px; } .scan-box p span { color: var(--muted); }
+.spinner { width: 22px; height: 22px; border: 3px solid var(--accent-dim); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; flex: none; }
+.threat { display: grid; grid-template-columns: 1fr auto; gap: 12px; padding: 12px 0; border-top: 1px solid var(--line); }
+.threat:first-child { border-top: 0; }
+.threat b { font-weight: 600; } .threat .meta { color: var(--muted); font-size: .86em; display: block; overflow-wrap: anywhere; }
+
+/* ================= Salute dei dischi ================= */
+.dhealth { display: grid; gap: 12px; }
+.disk { display: grid; grid-template-columns: 1fr auto; gap: 8px 18px; padding: 14px 16px; border-radius: var(--r-md); background: var(--surface-2); border-left: 4px solid var(--ok); }
+.disk.warn { border-left-color: var(--warn); } .disk.bad { border-left-color: var(--bad); }
+.disk-name { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; } .disk-name b { font: 600 1.08em var(--head); }
+.disk p { margin: 0; color: var(--muted); grid-column: 1 / -1; font-size: .92em; }
+.disk .details { grid-column: 1 / -1; margin-top: 4px; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+.lifebar { display: block; height: 6px; border-radius: 3px; background: var(--surface); overflow: hidden; margin-top: 6px; max-width: 160px; }
+.lifebar em { display: block; height: 100%; background: var(--ok); }
+.lifebar em.warn { background: var(--warn); } .lifebar em.bad { background: var(--bad); }
+
 /* ================= Toast e dialoghi ================= */
 .toast {
   position: fixed; left: 50%; bottom: 26px; transform: translate(-50%, 20px); opacity: 0; z-index: 10;
@@ -368,6 +407,7 @@ dialog p { color: var(--muted); margin: 0 0 22px; }
 dialog .row { display: flex; justify-content: flex-end; gap: 10px; }
 
 @media (max-width: 1100px) {
+  .scan-options { grid-template-columns: 1fr; }
   .specs { grid-template-columns: repeat(2, 1fr); }
   .live { grid-template-columns: repeat(2, 1fr); }
   .lrow .date { display: none; }
@@ -376,3 +416,5 @@ dialog .row { display: flex; justify-content: flex-end; gap: 10px; }
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
 .drv.okbox { background: var(--ok-dim); }
+[hidden] { display: none !important; }
+.threat > .tag { align-self: start; }

@@ -14,6 +14,7 @@ import updater
 import launcher
 import apptools
 import tray
+import installer
 from backend import Api, is_admin, relaunch_as_admin, IS_WINDOWS
 
 ALLOWED_PREFS = set(updater.DEFAULT_SETTINGS) - {"game_mode_state", "game_mode_opts", "game_mode_close", "last_version",
@@ -172,10 +173,18 @@ def main():
     if tray.signal_existing_instance():
         return
 
-    # Chiede i permessi di amministratore (servono per driver, aggiornamenti e pulizia di sistema)
+    # Servono i permessi di amministratore (driver, aggiornamenti, pulizia di sistema):
+    # se c'è l'attività "PC Booster - Avvio" li prende da lì senza chiedere, altrimenti chiede a Windows
     if IS_WINDOWS and not is_admin() and "--no-admin" not in sys.argv:
+        if launcher.IS_FROZEN and launcher.task_exists() and launcher.run_task():
+            return
         if relaunch_as_admin():
-            sys.exit(0)
+            return
+
+    # Prima volta da Download/Documenti: si installa in C:\Program Files\PC Booster e si riapre da lì
+    if is_admin() and installer.needs_install():
+        if installer.install_and_launch():
+            return
 
     import webview
     updater.cleanup_old_versions()
@@ -191,9 +200,9 @@ def main():
         except OSError:
             pass
 
-    # Tiene aggiornati attività e collegamento (anche se l'exe è stato spostato)
-    if IS_WINDOWS and launcher.IS_FROZEN and is_admin() and prefs.get("no_uac_prompt", True):
-        threading.Thread(target=launcher.enable, daemon=True).start()
+    # Tiene aggiornati attività e collegamenti, e cancella la copia vecchia dopo l'installazione
+    if is_admin():
+        installer.post_start_maintenance(api, tray)
     if api._just_updated:
         tray.refresh_icons()
 

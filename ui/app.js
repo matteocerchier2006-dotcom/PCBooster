@@ -130,6 +130,8 @@ function go(view) {
   if (view === 'apps' && !state.apps.length) loadApps();
   if (view === 'settings') loadSettingsView();
   if (view === 'game') loadGame();
+  if (view === 'security') loadSecurity();
+  if (view === 'disk') loadDiskHealth();
 }
 
 // ================= Panoramica =================
@@ -184,6 +186,8 @@ async function runCheckup() {
     st: addFinding('pending', 'Controllo i programmi all\'avvio…'),
     upd: addFinding('pending', 'Chiedo a Windows Update se ci sono driver e aggiornamenti…'),
     wg: addFinding('pending', 'Controllo se i tuoi programmi sono aggiornati…'),
+    sec: addFinding('pending', 'Controllo antivirus e firewall…'),
+    dh: addFinding('pending', 'Controllo la salute dei dischi…'),
   };
 
   const gpus = await api.get_gpu_info(); state.gpus = gpus;
@@ -227,6 +231,25 @@ async function runCheckup() {
     if (r.updates.length) { penalty += 8 + drv * 3; fillFinding(steps.upd, 'warn', `${r.updates.length} ${plural(r.updates.length, 'aggiornamento disponibile', 'aggiornamenti disponibili')}` + (drv ? `, di cui ${drv} driver` : ''), r.updates.slice(0, 2).map(u => u.title).join(' — '), 'Installa', () => go('updates')); }
     else fillFinding(steps.upd, 'ok', 'Windows e i driver sono aggiornati', 'Nessun aggiornamento in sospeso.');
   }
+  const sec = await api.security_status(); state.sec = sec;
+  const thr = (await api.security_threats()).filter(t => t.active);
+  if (sec.ok || sec.other_av) {
+    const avOn = sec.realtime || (sec.other_av || []).some(a => a.on);
+    const fwOff = (sec.firewall || []).filter(f => !f.on).length;
+    if (thr.length) { penalty += 25; fillFinding(steps.sec, 'bad', `${thr.length} ${plural(thr.length, 'minaccia trovata', 'minacce trovate')}`, thr.map(t => t.name).slice(0, 2).join(', '), 'Rimuovi', () => go('security')); }
+    else if (!avOn) { penalty += 20; fillFinding(steps.sec, 'bad', 'La protezione antivirus è spenta', 'Il PC non è protetto dai virus in questo momento.', 'Attiva', () => go('security')); }
+    else if (fwOff) { penalty += 10; fillFinding(steps.sec, 'bad', 'Il firewall è spento', 'Il firewall blocca gli accessi indesiderati da internet.', 'Attiva', () => go('security')); }
+    else if (sec.realtime && sec.sig_age_days > 3) { penalty += 5; fillFinding(steps.sec, 'warn', `Definizioni dei virus vecchie di ${sec.sig_age_days} giorni`, 'Aggiornale per riconoscere i virus più nuovi.', 'Aggiorna', () => go('security')); }
+    else fillFinding(steps.sec, 'ok', 'Il PC è protetto', sec.realtime ? 'Microsoft Defender attivo, definizioni aggiornate, firewall acceso.' : `Antivirus attivo: ${(sec.other_av || []).filter(a => a.on).map(a => a.name).join(', ')}.`);
+  } else fillFinding(steps.sec, 'warn', 'Non riesco a leggere lo stato dell\'antivirus', sec.msg || '');
+  setSecDot(sec, thr);
+
+  const disks = await api.disk_health(); state.disks = disks;
+  const badDisk = disks.find(d => d.status === 'bad'), warnDisk = disks.find(d => d.status === 'warn');
+  if (badDisk) { penalty += 20; fillFinding(steps.dh, 'bad', `Il disco ${badDisk.name} ha un problema`, badDisk.note, 'Vedi', () => go('disk')); }
+  else if (warnDisk) { penalty += 8; fillFinding(steps.dh, 'warn', `Attenzione al disco ${warnDisk.name}`, warnDisk.note, 'Vedi', () => go('disk')); }
+  else fillFinding(steps.dh, 'ok', 'Dischi in salute', disks.map(d => `${d.name}${d.life != null ? ` · vita ${d.life}%` : ''}`).join(', '));
+
   const wg = await api.list_app_updates();
   if (!wg.ok) fillFinding(steps.wg, 'warn', 'Non riesco a controllare i programmi', wg.msg);
   else {
@@ -742,3 +765,126 @@ window.onTrayChange = async () => {
   const g = await api.get_game_mode(); $('#gameDot').hidden = !g.state;
   if (state.view === 'game') loadGame();
 };
+
+// ================= Sicurezza =================
+const SHIELD = '<svg viewBox="0 0 48 54"><path class="body" d="M24 3l19 7v14c0 12-8 22-19 27C13 46 5 36 5 24V10z"/><path class="mark" d="M15 27l6 6 12-13"/></svg>';
+const SHIELD_X = '<svg viewBox="0 0 48 54"><path class="body" d="M24 3l19 7v14c0 12-8 22-19 27C13 46 5 36 5 24V10z"/><path class="mark" d="M24 16v14M24 37v1"/></svg>';
+function setSecDot(sec, active) { $('#secDot').hidden = !(active.length || (sec && !sec.realtime && !(sec.other_av || []).some(a => a.on))); }
+async function loadSecurity() {
+  const [st, th] = await Promise.all([api.security_status(), api.security_threats()]);
+  state.sec = st; renderSecHero(st, th); renderThreats(th); setSecDot(st, th.filter(t => t.active));
+  const p = await api.security_progress(); if (p.status === 'running') showScan(p);
+}
+function renderSecHero(st, th) {
+  const box = $('#secHero'); box.innerHTML = ''; box.className = 'sec-hero';
+  if (!st.ok && !(st.other_av || []).length) { box.append(h('p', 'empty', st.msg || 'Non riesco a leggere lo stato dell\'antivirus.')); return; }
+  const active = th.filter(t => t.active);
+  const other = (st.other_av || []).filter(a => a.on);
+  const avOn = st.realtime || other.length;
+  const fwOff = (st.firewall || []).filter(f => !f.on);
+  const lvl = active.length || !avOn || fwOff.length ? 'bad' : (st.realtime && st.sig_age_days > 3) || (st.quick_age_days == null || st.quick_age_days > 14) ? 'warn' : 'ok';
+  box.classList.add(lvl);
+  const sh = h('div', 'shield'); sh.innerHTML = lvl === 'bad' ? SHIELD_X : SHIELD;
+  const right = h('div');
+  right.append(h('h2', null, lvl === 'ok' ? 'Il PC è protetto' : lvl === 'warn' ? 'Protetto, ma c\'è qualcosa da fare' : 'Il PC è a rischio'));
+  const checks = h('div', 'checks');
+  const row = (l, html, btnText, fn) => {
+    const r = h('div', 'check ' + l), sp = h('span'); sp.innerHTML = html; r.append(h('i', 'dot'), sp);
+    if (btnText) { const b = h('button', 'btn small', btnText); b.onclick = () => busy(b, fn); r.append(b); } else r.append(h('i'));
+    checks.append(r);
+  };
+  if (other.length && !st.realtime) row('ok', `<b>Antivirus:</b> ${other.map(a => a.name).join(', ')}. Defender fa i controlli che chiedi tu.`);
+  else row(st.realtime ? 'ok' : 'bad', st.realtime ? '<b>Microsoft Defender</b> attivo, con protezione in tempo reale.' : '<b>Protezione in tempo reale spenta.</b>',
+    st.realtime ? null : 'Attiva', async () => { const r = await api.security_realtime(); toast(r.msg, r.ok); loadSecurity(); });
+  if (st.sig_age_days != null) row(st.sig_age_days > 3 ? 'warn' : 'ok', `<b>Definizioni dei virus:</b> ${st.sig_age_days === 0 ? 'aggiornate oggi' : `di ${st.sig_age_days} ${plural(st.sig_age_days, 'giorno', 'giorni')} fa`}${st.sig_updated ? ` (${st.sig_updated})` : ''}.`,
+    st.sig_age_days > 3 ? 'Aggiorna' : null, updateDefs);
+  const q = st.quick_age_days;
+  row(q == null || q > 14 ? 'warn' : 'ok', `<b>Ultimo controllo:</b> ${q == null ? 'mai fatto' : q === 0 ? 'oggi' : `${q} ${plural(q, 'giorno', 'giorni')} fa`}.`, q == null || q > 14 ? 'Controlla ora' : null, () => startScan('quick'));
+  row(fwOff.length ? 'bad' : 'ok', fwOff.length ? `<b>Firewall spento</b> sulle reti: ${fwOff.map(f => f.name).join(', ')}.` : '<b>Firewall</b> attivo su tutte le reti.',
+    fwOff.length ? 'Attiva' : null, async () => { const r = await api.security_firewall(); toast(r.msg, r.ok); loadSecurity(); });
+  if (active.length) row('bad', `<b>${active.length} ${plural(active.length, 'minaccia attiva', 'minacce attive')}</b>: rimuovile qui sotto.`);
+  right.append(checks);
+  box.append(sh, right);
+}
+function renderThreats(list) {
+  const box = $('#threatList'); box.innerHTML = '';
+  const rm = $('#secRemove'); const active = list.filter(t => t.active); rm.hidden = !active.length;
+  if (!list.length) { box.append(h('p', 'ok-line', 'Nessuna minaccia trovata.')); return; }
+  list.forEach(t => {
+    const r = h('div', 'threat'), left = h('div'), name = h('b', null, t.name);
+    left.append(name, h('span', 'meta', `Pericolo: ${t.severity}${t.when ? ` · trovata il ${t.when}` : ''}${t.ran ? ' · era stata avviata' : ''}`));
+    t.files.forEach(f => left.append(h('span', 'meta', f)));
+    r.append(left, h('span', 'tag ' + (t.active ? 'warn' : 'ok'), t.active ? 'Da rimuovere' : 'Rimossa'));
+    box.append(r);
+  });
+}
+$('#secRemove').addEventListener('click', e => busy(e.currentTarget, async () => {
+  const r = await api.security_remove(); toast(r.msg, r.ok); loadSecurity();
+}));
+async function updateDefs() { toast('Aggiorno le definizioni dei virus…'); const r = await api.security_update(); toast(r.msg, r.ok); loadSecurity(); }
+$('#secUpdate').addEventListener('click', e => busy(e.currentTarget, updateDefs));
+$('#secOpen').addEventListener('click', () => api.open_windows_security());
+$$('.scan-opt').forEach(b => b.addEventListener('click', () => startScan(b.dataset.scan)));
+let scanTimer;
+async function startScan(kind) {
+  if (kind === 'offline') {
+    if (!await confirmBox('Controllo offline?', 'Il PC si riavvia subito e fa un controllo di circa 15 minuti prima che parta Windows. Salva il lavoro aperto prima di continuare.', 'Riavvia e controlla', true)) return;
+    const r = await api.security_offline(); toast(r.msg, r.ok); return;
+  }
+  const r = await api.security_scan(kind);
+  if (!r.ok) return toast(r.msg, false);
+  showScan({ status: 'running', kind, elapsed: 0 });
+}
+function showScan(p) {
+  const box = $('#scanBox'); box.hidden = false;
+  $$('.scan-opt').forEach(b => b.disabled = true);
+  const paint = s => {
+    box.innerHTML = '';
+    const name = s.kind === 'full' ? 'Controllo completo' : 'Controllo veloce';
+    if (s.status === 'running') {
+      const m = Math.floor(s.elapsed / 60), sec = s.elapsed % 60;
+      const p = h('p'); p.append(h('b', null, `${name} in corso… `), h('span', null, `${m} min ${String(sec).padStart(2, '0')} s. Puoi usare il PC e anche cambiare pagina.`));
+      const c = h('button', 'btn small', 'Annulla'); c.onclick = async () => { const r = await api.security_cancel(); toast(r.msg); };
+      box.append(h('div', 'spinner'), p, c);
+    } else if (s.status === 'done') {
+      const p = h('p');
+      if (s.found) p.append(h('b', null, `${name} finito: ${s.found} ${plural(s.found, 'minaccia trovata', 'minacce trovate')}. `), h('span', null, 'Rimuovile dall\'elenco qui sotto.'));
+      else p.append(h('b', null, `${name} finito: nessuna minaccia. `), h('span', null, `Durata: ${Math.max(1, Math.round(s.seconds / 60))} min.`));
+      box.append(p);
+    } else { box.hidden = true; }
+  };
+  paint(p);
+  clearInterval(scanTimer);
+  scanTimer = setInterval(async () => {
+    const s = await api.security_progress(); paint(s);
+    if (s.status !== 'running') { clearInterval(scanTimer); $$('.scan-opt').forEach(b => b.disabled = false); if (s.status === 'done') { toast(s.found ? 'Trovate delle minacce: controlla l\'elenco.' : 'Controllo finito: nessuna minaccia.', !s.found); loadSecurity(); } }
+  }, 1000);
+}
+
+// ================= Salute dei dischi =================
+async function loadDiskHealth(force = false) {
+  if (state.disks && !force) return renderDiskHealth();
+  $('#diskHealth').innerHTML = '<p class="empty">Leggo lo stato dei dischi…</p>';
+  state.disks = await api.disk_health(); renderDiskHealth();
+}
+function renderDiskHealth() {
+  const box = $('#diskHealth'); box.innerHTML = '';
+  if (!state.disks.length) { box.append(h('p', 'empty', 'Non riesco a leggere i dischi.')); return; }
+  const wrap = h('div', 'dhealth');
+  state.disks.forEach(d => {
+    const c = h('div', 'disk ' + d.status);
+    const nm = h('div', 'disk-name'); nm.append(h('b', null, d.name), h('span', 'tag acc', d.kind)); if (d.letters) nm.append(h('span', 'tag muted', d.letters));
+    const label = { ok: 'In salute', warn: 'Attenzione', bad: 'Problema' }[d.status];
+    c.append(nm, h('span', 'tag ' + ({ ok: 'ok', warn: 'warn', bad: 'warn' })[d.status], label), h('p', null, d.note));
+    const det = h('div', 'details');
+    const cell = (k, v, extra) => { const x = h('div'); x.append(h('span', null, k), h('b', null, v)); if (extra) x.append(extra); det.append(x); };
+    cell('Capacità', d.size_gb >= 1000 ? (d.size_gb / 1024).toFixed(1) + ' TB' : d.size_gb + ' GB');
+    if (d.life != null) { const bar = h('i', 'lifebar'), em = h('em', d.life < 20 ? 'bad' : d.life < 40 ? 'warn' : ''); em.style.width = d.life + '%'; bar.append(em); cell('Vita residua', d.life + '%', bar); }
+    cell('Temperatura', d.temp ? d.temp + ' °C' : 'n.d.');
+    if (d.hours != null) cell('Ore di accensione', `${Number(d.hours).toLocaleString('it-IT')} h`, h('small', null, `circa ${Math.round(d.hours / 24)} giorni`));
+    if (d.errors) cell('Errori di lettura/scrittura', String(d.errors));
+    c.append(det); wrap.append(c);
+  });
+  box.append(wrap);
+}
+$('#healthRefresh').addEventListener('click', e => busy(e.currentTarget, () => loadDiskHealth(true)));

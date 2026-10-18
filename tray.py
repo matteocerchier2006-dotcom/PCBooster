@@ -275,7 +275,18 @@ class Tray:
         except Exception as e:
             updater.log(f"Controllo driver non riuscito: {e}")
 
-        # 3) file da pulire (al massimo un avviso al giorno)
+        # 3) minacce trovate da Microsoft Defender
+        try:
+            active = [t for t in self.api.security_threats() if t.get("active")]
+            if active and (manual or seen.get("threats") != len(active)):
+                found = True
+                self.notify("Attenzione: minacce trovate",
+                            f"Microsoft Defender ha trovato {len(active)} minacce. Apri PC Booster → Sicurezza.")
+            seen["threats"] = len(active)
+        except Exception as e:
+            updater.log(f"Controllo minacce non riuscito: {e}")
+
+        # 4) file da pulire (al massimo un avviso al giorno)
         today = time.strftime("%Y-%m-%d")
         if manual or seen.get("junk_day") != today:
             scan = self.api.scan_junk()

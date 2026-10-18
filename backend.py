@@ -15,6 +15,7 @@ import threading
 from cleaner import Cleaner, human_size
 import drivers
 import apptools
+import security
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -173,6 +174,7 @@ class Api:
         self._cleaner = Cleaner()
         self._driver_dl = drivers.DriverDownloader()
         self._gpus = None
+        self._sec = security.Security()
 
     # ================= Panoramica =================
     def get_system_info(self):
@@ -415,6 +417,44 @@ class Api:
 
     def driver_progress(self):
         return self._driver_dl.progress()
+
+    # ---------- sicurezza (Microsoft Defender) ----------
+    def security_status(self):
+        return self._sec.status()
+
+    def security_threats(self):
+        return self._sec.threats()
+
+    def security_scan(self, kind):
+        return self._sec.start_scan(kind)
+
+    def security_progress(self):
+        return self._sec.scan_progress()
+
+    def security_cancel(self):
+        return self._sec.cancel_scan()
+
+    def security_update(self):
+        return self._sec.update_signatures()
+
+    def security_remove(self):
+        return self._sec.remove_threats()
+
+    def security_offline(self):
+        return self._sec.offline_scan()
+
+    def security_realtime(self):
+        return self._sec.enable_realtime()
+
+    def security_firewall(self):
+        return self._sec.enable_firewall()
+
+    def open_windows_security(self):
+        return self._sec.open_windows_security()
+
+    # ---------- salute dei dischi ----------
+    def disk_health(self):
+        return security.disk_health()
 
     # ---------- aggiornamento app (winget) ----------
     def list_app_updates(self):
