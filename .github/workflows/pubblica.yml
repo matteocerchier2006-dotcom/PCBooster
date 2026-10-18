@@ -1,4 +1,5 @@
 # Quando pubblichi una nuova versione (tag v1.2.3), GitHub crea PCBooster.exe su Windows e lo pubblica.
+# La creazione dell'exe la fa build.py: per cambiarla basta caricare un build.py nuovo.
 name: Crea e pubblica PC Booster
 
 on:
@@ -18,22 +19,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Scrivi versione e repository
-        shell: pwsh
-        run: |
-          $ver = "${{ github.ref_name }}".TrimStart("v")
-          Set-Content -Path version.txt -Value $ver -NoNewline
-          Set-Content -Path repo.txt -Value "${{ github.repository }}" -NoNewline
-
       - name: Installa i componenti
         run: python -m pip install -r requirements.txt
 
       - name: Crea l'exe
-        run: >
-          python -m PyInstaller --noconfirm --onefile --windowed --uac-admin
-          --name PCBooster
-          --add-data "ui;ui" --add-data "version.txt;." --add-data "repo.txt;."
-          app.py
+        run: python build.py "${{ github.ref_name }}" "${{ github.repository }}"
 
       - name: Pubblica la release
         shell: pwsh
