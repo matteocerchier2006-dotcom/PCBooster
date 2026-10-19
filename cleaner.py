@@ -476,12 +476,14 @@ class Cleaner:
             if sp == "dism":
                 drive = os.environ.get("SystemDrive", "C:") + "\\"
                 before = shutil.disk_usage(drive).free
-                r = winutil.run(["dism", "/Online", "/Cleanup-Image", "/StartComponentCleanup"], timeout=3600)
+                # DISM non va mai interrotto a metà: se ci mette più di un'ora lo si lascia finire da solo
+                r = winutil.run(["dism", "/Online", "/Cleanup-Image", "/StartComponentCleanup"], timeout=3600,
+                                stop_on_timeout=False)
                 freed += max(0, shutil.disk_usage(drive).free - before)
                 if r.ok:
                     notes.append("Componenti vecchi di Windows ripuliti.")
                 elif r.timed_out:
-                    notes.append("La pulizia dei componenti di Windows ci mette troppo: riprova più tardi.")
+                    notes.append("La pulizia dei componenti di Windows continua in background: finirà da sola.")
                 else:
                     notes.append("La pulizia dei componenti di Windows non è riuscita (riprova dopo un riavvio).")
                 continue

@@ -89,24 +89,54 @@ class Result:
         return f"Result(rc={self.rc}, timed_out={self.timed_out}, out={self.out[:80]!r})"
 
 
-def run(args, timeout=60, env=None, cwd=None, log_errors=True):
-    """Esegue un programma e aspetta la fine. Non solleva mai eccezioni: guarda Result.ok."""
+def _kill_tree(p):
+    """Chiude il programma E tutto quello che ha avviato (es. winget -> installazione del produttore).
+    Python da solo chiude solo il primo, gli altri resterebbero aperti in background."""
+    if IS_WINDOWS:
+        try:
+            subprocess.run([tool("taskkill"), "/T", "/F", "/PID", str(p.pid)], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30,
+                           creationflags=CREATE_NO_WINDOW)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    try:
+        p.kill()
+    except OSError:
+        pass
+
+
+def run(args, timeout=60, env=None, cwd=None, log_errors=True, stop_on_timeout=True):
+    """Esegue un programma e aspetta la fine. Non solleva mai eccezioni: guarda Result.ok.
+
+    Se supera il tempo massimo:
+    - di norma viene chiuso insieme a tutti i programmi che ha avviato;
+    - con stop_on_timeout=False viene lasciato finire da solo (per operazioni di Windows come DISM,
+      che non vanno mai interrotte a metà). In quel caso il suo testo non viene letto."""
     args = [str(a) for a in args]
     if args:
         args[0] = tool(args[0])
+    out_pipe = subprocess.PIPE if stop_on_timeout else subprocess.DEVNULL
     try:
-        p = subprocess.run(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                           timeout=timeout, env=env, cwd=cwd,
-                           creationflags=CREATE_NO_WINDOW if IS_WINDOWS else 0)
-        return Result(p.returncode, decode(p.stdout), decode(p.stderr))
-    except subprocess.TimeoutExpired as e:
-        if log_errors:
-            _log(f"Tempo scaduto ({timeout}s): {' '.join(args)[:300]}")
-        return Result(-1, decode(e.stdout), decode(e.stderr), timed_out=True, error="timeout")
+        p = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=out_pipe, stderr=out_pipe, env=env, cwd=cwd,
+                             creationflags=CREATE_NO_WINDOW if IS_WINDOWS else 0)
     except OSError as e:
         if log_errors:
             _log(f"Comando non avviato: {' '.join(args)[:300]} -> {e}")
         return Result(-1, error=str(e))
+    try:
+        out, err = p.communicate(timeout=timeout)
+        return Result(p.returncode, decode(out), decode(err))
+    except subprocess.TimeoutExpired:
+        if log_errors:
+            _log(f"Tempo scaduto ({timeout}s){'' if stop_on_timeout else ', lasciato finire'}: {' '.join(args)[:300]}")
+        if not stop_on_timeout:
+            return Result(-1, timed_out=True, error="timeout")
+        _kill_tree(p)
+        try:
+            out, err = p.communicate(timeout=10)
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            out, err = b"", b""
+        return Result(-1, decode(out), decode(err), timed_out=True, error="timeout")
 
 
 def start(args, cwd=None, hidden=True):
