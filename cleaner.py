@@ -10,12 +10,15 @@ I file in uso vengono saltati: è normale e non è un errore.
 import os
 import sys
 import glob
+import stat
+import time
 import shutil
+import ctypes
 import datetime
-import subprocess
+
+import winutil
 
 IS_WINDOWS = sys.platform == "win32"
-CREATE_NO_WINDOW = 0x08000000
 
 try:
     import psutil
@@ -32,28 +35,166 @@ def human_size(num: float) -> str:
 
 
 def _ps(script: str, timeout: int = 600) -> str:
-    if not IS_WINDOWS:
-        return ""
-    r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
-                        "[Console]::OutputEncoding=[Text.Encoding]::UTF8;" + script],
-                       capture_output=True, text=True, encoding="utf-8", errors="replace",
-                       timeout=timeout, creationflags=CREATE_NO_WINDOW)
-    return r.stdout.strip()
+    return winutil.ps(script, timeout)
+
+
+# --------------------------------------------------------------------------
+# Cancellazione sicura
+# --------------------------------------------------------------------------
+FILE_ATTRIBUTE_READONLY = 0x1
+FILE_ATTRIBUTE_REPARSE_POINT = 0x400      # collegamenti, "junction", file di OneDrive
+FILE_ATTRIBUTE_OFFLINE = 0x1000
+FILE_ATTRIBUTE_RECALL_ON_OPEN = 0x40000
+FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x400000
+CLOUD_ONLY = FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+
+
+def _attrs(st):
+    return getattr(st, "st_file_attributes", 0)
+
+
+def _is_link(st):
+    """Vero per collegamenti simbolici e "junction": non si entra mai dentro, si toglie solo il collegamento.
+    I file di OneDrive sono anche loro "reparse point", ma non puntano altrove: quelli non contano."""
+    if stat.S_ISLNK(st.st_mode):
+        return True
+    if not _attrs(st) & FILE_ATTRIBUTE_REPARSE_POINT:
+        return False
+    tag = getattr(st, "st_reparse_tag", 0)
+    return not tag or bool(tag & 0x20000000)    # 0x20000000 = punta a un altro percorso
+
+
+def _norm(p):
+    return os.path.normcase(os.path.normpath(p))
+
+
+def _protected_roots():
+    """Cartelle che non si cancellano mai, nemmeno se una variabile di Windows fosse sbagliata."""
+    env = os.environ
+    home = env.get("USERPROFILE") or os.path.expanduser("~")
+    sysdrive = (env.get("SystemDrive") or "C:") + os.sep
+    roots = {sysdrive, home, os.path.dirname(home),
+             env.get("WINDIR", ""), os.path.join(env.get("WINDIR", ""), "System32"),
+             env.get("ProgramFiles", ""), env.get("ProgramFiles(x86)", ""), env.get("PROGRAMDATA", ""),
+             env.get("APPDATA", ""), env.get("LOCALAPPDATA", ""), os.path.join(home, "AppData"),
+             os.path.join(home, "AppData", "LocalLow"), os.path.join(home, "Documents"),
+             os.path.join(home, "Desktop"), os.path.join(home, "Downloads"), os.path.join(home, "Pictures"),
+             os.path.join(home, "Videos"), os.path.join(home, "Music"), "/", "/home", "/root", "/tmp"}
+    return {_norm(r) for r in roots if r}
+
+
+def _safe_dir(path):
+    """Una cartella da svuotare deve essere un percorso completo, abbastanza "profondo" e non protetto."""
+    if not path or not os.path.isabs(path):
+        return False
+    n = _norm(path)
+    parts = [x for x in n.replace("\\", "/").split("/") if x]
+    return len(parts) >= 3 and n not in _protected_roots()
+
+
+def _own_dirs():
+    """Cartelle dell'app in uso: PyInstaller si estrae in %TEMP%\\_MEIxxxx mentre l'app è aperta."""
+    out = set()
+    mei = getattr(sys, "_MEIPASS", None)
+    if mei:
+        out.add(_norm(mei))
+    return out
+
+
+def _young(st, min_age, now):
+    born = getattr(st, "st_birthtime", None) or getattr(st, "st_ctime", 0)
+    return bool(min_age) and now - max(st.st_mtime, born) < min_age
+
+
+def _skip_entry(name, path, st, min_age, now):
+    """Voci da lasciare stare: l'app stessa (e le altre app PyInstaller aperte) e i file appena creati."""
+    low = name.lower()
+    if low.startswith("_mei") or low.startswith("pcbooster") or _norm(path) in _own_dirs():
+        return True
+    return _young(st, min_age, now)
+
+
+def _make_writable(path, st):
+    if _attrs(st) & FILE_ATTRIBUTE_READONLY or not (st.st_mode & stat.S_IWRITE):
+        try:
+            os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+        except OSError:
+            pass
+
+
+def _remove(path, st=None, min_age=0, now=0):
+    """Elimina un file o una cartella senza mai seguire i collegamenti.
+    Restituisce (byte liberati, file in uso saltati, file recenti lasciati)."""
+    try:
+        st = st or os.lstat(path)
+    except OSError:
+        return 0, 0, 0
+    if _is_link(st):
+        try:
+            if stat.S_ISDIR(st.st_mode) or (_attrs(st) & 0x10):   # 0x10 = cartella
+                os.rmdir(path)            # toglie solo il collegamento, non quello a cui punta
+            else:
+                os.unlink(path)
+        except OSError:
+            return 0, 1, 0
+        return 0, 0, 0
+    if stat.S_ISDIR(st.st_mode):
+        freed = skipped = kept = 0
+        try:
+            entries = list(os.scandir(path))
+        except OSError:
+            return 0, 1, 0
+        for e in entries:
+            f, sk, kp = _remove(e.path, None, min_age, now)
+            freed += f
+            skipped += sk
+            kept += kp
+        if not skipped and not kept:
+            try:
+                os.rmdir(path)
+            except OSError:
+                pass
+        return freed, skipped, kept
+    if _young(st, min_age, now):
+        return 0, 0, 1
+    _make_writable(path, st)
+    try:
+        os.remove(path)
+        return st.st_size, 0, 0
+    except OSError:
+        return 0, 1, 0
 
 
 def _size(path: str) -> int:
-    if os.path.isfile(path):
-        try:
-            return os.path.getsize(path)
-        except OSError:
-            return 0
+    """Spazio occupato, senza entrare nei collegamenti."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return 0
+    if _is_link(st):
+        return 0
+    if not stat.S_ISDIR(st.st_mode):
+        return st.st_size
     total = 0
-    for root, _d, files in os.walk(path, onerror=lambda e: None):
-        for f in files:
-            try:
-                total += os.path.getsize(os.path.join(root, f))
-            except OSError:
-                pass
+    stack = [path]
+    while stack:
+        d = stack.pop()
+        try:
+            it = os.scandir(d)
+        except OSError:
+            continue
+        with it:
+            for e in it:
+                try:
+                    est = e.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if _is_link(est):
+                    continue
+                if stat.S_ISDIR(est.st_mode):
+                    stack.append(e.path)
+                else:
+                    total += est.st_size
     return total
 
 
@@ -96,9 +237,10 @@ def _targets():
     t = [
         # ---- Windows ----
         dict(id="user_temp", cat="windows", label="File temporanei dell'utente", default=True,
-             desc="File lasciati dai programmi mentre lavorano.", dirs=[env.get("TEMP", "")]),
+             desc="File lasciati dai programmi mentre lavorano. Quelli di oggi restano (potrebbero servire ancora).",
+             dirs=[env.get("TEMP", "")], min_age=24 * 3600),
         dict(id="win_temp", cat="windows", label="File temporanei di Windows", default=True,
-             desc="Temporanei di sistema.", dirs=[os.path.join(windir, "Temp")]),
+             desc="Temporanei di sistema.", dirs=[os.path.join(windir, "Temp")], min_age=24 * 3600),
         dict(id="wu_cache", cat="windows", label="Download di Windows Update", default=True,
              desc="Aggiornamenti già installati: non servono più.",
              dirs=[os.path.join(windir, "SoftwareDistribution", "Download")], special="wu"),
@@ -199,12 +341,19 @@ def _targets():
     return t
 
 
+def _winold_path():
+    return os.path.join((os.environ.get("SystemDrive") or "C:") + "\\", "Windows.old")
+
+
 def _expand(patterns):
+    """Percorsi reali (con * espanso). I percorsi non completi o protetti vengono scartati."""
     out = []
     for p in patterns or []:
-        if not p:
+        if not p or not os.path.isabs(p):
             continue
-        out.extend(glob.glob(p) if any(c in p for c in "*?") else [p])
+        for x in (glob.glob(p) if any(c in p for c in "*?") else [p]):
+            if _safe_dir(x) and x not in out:
+                out.append(x)
     return out
 
 
@@ -222,6 +371,27 @@ DEMO_ITEMS = [("user_temp", "windows"), ("win_temp", "windows"), ("wu_cache", "w
               ("recycle", "windows"), ("dns", "windows"), ("br_zen", "browser"), ("br_chrome", "browser"),
               ("br_edge", "browser"), ("dx_shader", "games"), ("nv_cache", "games"), ("steam", "games"),
               ("epic", "games"), ("discord", "apps"), ("spotify", "apps"), ("dism", "deep"), ("winold", "deep")]
+
+
+def _send_to_recycle_bin(path):
+    """Sposta un file nel Cestino con la funzione di Windows (senza finestre di conferma)."""
+    if not IS_WINDOWS:
+        return False
+    try:
+        from ctypes import wintypes
+
+        class SHFILEOPSTRUCTW(ctypes.Structure):
+            _fields_ = [("hwnd", wintypes.HWND), ("wFunc", wintypes.UINT), ("pFrom", wintypes.LPCWSTR),
+                        ("pTo", wintypes.LPCWSTR), ("fFlags", ctypes.c_ushort), ("fAnyOperationsAborted", wintypes.BOOL),
+                        ("hNameMappings", ctypes.c_void_p), ("lpszProgressTitle", wintypes.LPCWSTR)]
+        FO_DELETE = 3
+        FOF_SILENT, FOF_NOCONFIRMATION, FOF_ALLOWUNDO, FOF_NOERRORUI = 0x4, 0x10, 0x40, 0x400
+        op = SHFILEOPSTRUCTW(None, FO_DELETE, os.path.abspath(path) + "\0", None,
+                             FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI, False, None, None)
+        return ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op)) == 0 and not op.fAnyOperationsAborted
+    except Exception as e:
+        winutil._log(f"Cestino: {e}")
+        return False
 
 
 class Cleaner:
@@ -249,6 +419,9 @@ class Cleaner:
                 size = 0
             elif sp == "dism":
                 size = None  # non calcolabile in anticipo
+            elif sp == "winold":
+                path = _winold_path()
+                size = _size(path) if os.path.isdir(path) else 0
             else:
                 size = sum(_size(p) for p in _expand(t.get("dirs")) if os.path.isdir(p))
                 size += sum(_size(f) for f in _expand(t.get("files")) if os.path.isfile(f))
@@ -293,7 +466,7 @@ class Cleaner:
                 freed += before
                 continue
             if sp == "dns":
-                subprocess.run(["ipconfig", "/flushdns"], capture_output=True, creationflags=CREATE_NO_WINDOW)
+                winutil.run(["ipconfig", "/flushdns"], timeout=20)
                 continue
             if sp == "delivery":
                 before = sum(_size(p) for p in _expand(t.get("dirs")))
@@ -301,20 +474,26 @@ class Cleaner:
                 freed += max(0, before - sum(_size(p) for p in _expand(t.get("dirs"))))
                 continue
             if sp == "dism":
-                before = shutil.disk_usage(os.environ.get("SystemDrive", "C:") + "\\").free
-                subprocess.run(["Dism.exe", "/Online", "/Cleanup-Image", "/StartComponentCleanup"],
-                               capture_output=True, creationflags=CREATE_NO_WINDOW, timeout=3600)
-                after = shutil.disk_usage(os.environ.get("SystemDrive", "C:") + "\\").free
-                freed += max(0, after - before)
-                notes.append("Componenti vecchi di Windows ripuliti.")
+                drive = os.environ.get("SystemDrive", "C:") + "\\"
+                before = shutil.disk_usage(drive).free
+                r = winutil.run(["dism", "/Online", "/Cleanup-Image", "/StartComponentCleanup"], timeout=3600)
+                freed += max(0, shutil.disk_usage(drive).free - before)
+                if r.ok:
+                    notes.append("Componenti vecchi di Windows ripuliti.")
+                elif r.timed_out:
+                    notes.append("La pulizia dei componenti di Windows ci mette troppo: riprova più tardi.")
+                else:
+                    notes.append("La pulizia dei componenti di Windows non è riuscita (riprova dopo un riavvio).")
                 continue
             if sp == "winold":
-                path = _expand(t.get("dirs"))[0]
+                path = _winold_path()
+                if not os.path.isdir(path) or os.path.basename(path).lower() != "windows.old":
+                    continue
                 before = _size(path)
                 for cmd in (["takeown", "/F", path, "/R", "/A", "/D", "Y"],
                             ["icacls", path, "/grant", "*S-1-5-32-544:F", "/T", "/C", "/Q"],
                             ["cmd", "/c", "rmdir", "/s", "/q", path]):
-                    subprocess.run(cmd, capture_output=True, creationflags=CREATE_NO_WINDOW, timeout=1800)
+                    winutil.run(cmd, timeout=1800)
                 freed += before if not os.path.exists(path) else max(0, before - _size(path))
                 continue
             if sp == "wu":
@@ -333,33 +512,41 @@ class Cleaner:
 
     @staticmethod
     def _wipe(t):
+        """Svuota le cartelle della voce (mai la cartella stessa) e cancella i file indicati."""
         freed = skipped = 0
+        min_age = t.get("min_age", 0)
+        now = time.time()
         for d in _expand(t.get("dirs")):
-            if not os.path.isdir(d):
+            try:
+                dst = os.lstat(d)
+            except OSError:
                 continue
-            for name in os.listdir(d):
-                p = os.path.join(d, name)
+            if _is_link(dst) or not stat.S_ISDIR(dst.st_mode):
+                continue    # la cartella di cache è un collegamento verso altro: non si tocca
+            try:
+                entries = list(os.scandir(d))
+            except OSError:
+                continue
+            for e in entries:
                 try:
-                    size = _size(p)
-                    if os.path.isdir(p) and not os.path.islink(p):
-                        shutil.rmtree(p)
-                    else:
-                        os.remove(p)
-                    freed += size
+                    st = e.stat(follow_symlinks=False)
                 except OSError:
-                    # cartella in parte in uso: elimina quello che si può
-                    if os.path.isdir(p):
-                        before = _size(p)
-                        shutil.rmtree(p, ignore_errors=True)
-                        freed += max(0, before - _size(p))
-                    skipped += 1
+                    continue
+                if _skip_entry(e.name, e.path, st, min_age, now):
+                    continue
+                f, sk, _kept = _remove(e.path, st, min_age, now)
+                freed += f
+                skipped += sk
         for f in _expand(t.get("files")):
             try:
-                size = os.path.getsize(f)
-                os.remove(f)
-                freed += size
+                st = os.lstat(f)
             except OSError:
-                skipped += 1
+                continue
+            if _is_link(st) or stat.S_ISDIR(st.st_mode):
+                continue
+            fr, sk, _kept = _remove(f, st)
+            freed += fr
+            skipped += sk
         return freed, skipped
 
     @staticmethod
@@ -392,17 +579,30 @@ class Cleaner:
         found = []
         seen = set()
         for root in roots:
-            for dirpath, dirnames, files in os.walk(root, onerror=lambda e: None):
-                dirnames[:] = [d for d in dirnames if not d.startswith(".") and d.lower() != "appdata"]
-                for f in files:
-                    p = os.path.join(dirpath, f)
-                    try:
-                        st = os.stat(p)
-                    except OSError:
-                        continue
-                    if st.st_size >= min_bytes and p.lower() not in seen:
-                        seen.add(p.lower())
-                        found.append((p, st.st_size, st.st_mtime))
+            stack = [root] if os.path.isdir(root) else []
+            while stack:
+                d = stack.pop()
+                try:
+                    it = os.scandir(d)
+                except OSError:
+                    continue
+                with it:
+                    for e in it:
+                        try:
+                            st = e.stat(follow_symlinks=False)
+                        except OSError:
+                            continue
+                        if _is_link(st):
+                            continue   # collegamenti e "junction": si salta (niente doppioni né giri infiniti)
+                        if stat.S_ISDIR(st.st_mode):
+                            if not e.name.startswith(".") and e.name.lower() != "appdata":
+                                stack.append(e.path)
+                            continue
+                        if _attrs(st) & CLOUD_ONLY:
+                            continue   # file solo su OneDrive: non occupa spazio sul PC
+                        if st.st_size >= min_bytes and e.path.lower() not in seen:
+                            seen.add(e.path.lower())
+                            found.append((e.path, st.st_size, st.st_mtime))
         found.sort(key=lambda x: x[1], reverse=True)
         now = datetime.datetime.now()
         self._large = []
@@ -419,7 +619,7 @@ class Cleaner:
     def reveal_file(self, item_id):
         it = self._large_item(item_id)
         if it and IS_WINDOWS:
-            subprocess.Popen(["explorer", "/select,", it["path"]])
+            winutil.start(["explorer", "/select,", it["path"]], hidden=False)
         return {"ok": bool(it)}
 
     def recycle_file(self, item_id):
@@ -429,9 +629,12 @@ class Cleaner:
             return {"ok": False, "msg": "File non trovato, aggiorna l'elenco."}
         if not IS_WINDOWS:
             return {"ok": True, "msg": f"Demo: {it['name']} spostato nel Cestino."}
-        safe = it["path"].replace("'", "''")
-        _ps("Add-Type -AssemblyName Microsoft.VisualBasic;"
-            f"[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile('{safe}','OnlyErrorDialogs','SendToRecycleBin')", 120)
+        if not os.path.isfile(it["path"]):
+            return {"ok": False, "msg": "Il file non c'è più: aggiorna l'elenco."}
+        if not _send_to_recycle_bin(it["path"]):
+            safe = winutil.q(it["path"])
+            _ps("Add-Type -AssemblyName Microsoft.VisualBasic;"
+                f"[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile('{safe}','OnlyErrorDialogs','SendToRecycleBin')", 120)
         if os.path.exists(it["path"]):
             return {"ok": False, "msg": "Non riesco a spostarlo: forse è aperto in un altro programma."}
         return {"ok": True, "msg": f"{it['name']} spostato nel Cestino."}

@@ -15,10 +15,10 @@ import sys
 import time
 import shutil
 import threading
-import subprocess
 
 import updater
 import launcher
+import winutil
 
 IS_WINDOWS = sys.platform == "win32"
 IS_FROZEN = getattr(sys, "frozen", False)
@@ -52,10 +52,8 @@ def install_and_launch():
         return False
     updater.save_settings({"old_install_path": sys.executable})
     updater.log(f"Installato in {TARGET} (prima era in {sys.executable})")
-    try:
-        subprocess.Popen([TARGET], cwd=INSTALL_DIR, close_fds=True)
-    except OSError as e:
-        updater.log(f"Avvio della copia installata non riuscito: {e}")
+    if not winutil.start([TARGET], cwd=INSTALL_DIR, hidden=False):
+        updater.log("Avvio della copia installata non riuscito")
         return False
     return True
 

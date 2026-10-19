@@ -7,36 +7,29 @@ PC Booster - sicurezza con Microsoft Defender (l'antivirus già dentro Windows).
 """
 import os
 import sys
-import json
 import time
 import threading
-import subprocess
+
+import winutil
 
 IS_WINDOWS = sys.platform == "win32"
-CREATE_NO_WINDOW = 0x08000000
 MPCMD = os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Windows Defender", "MpCmdRun.exe")
 
 
 def _ps(script, timeout=120):
-    if not IS_WINDOWS:
-        return ""
-    r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
-                        "[Console]::OutputEncoding=[Text.Encoding]::UTF8;" + script],
-                       capture_output=True, text=True, encoding="utf-8", errors="replace",
-                       timeout=timeout, creationflags=CREATE_NO_WINDOW)
-    return (r.stdout or "").strip()
+    return winutil.ps(script, timeout)
 
 
 def _json(script, timeout=120):
-    out = _ps(script + " | ConvertTo-Json -Depth 4 -Compress", timeout)
-    try:
-        return json.loads(out) if out else None
-    except json.JSONDecodeError:
-        return None
+    return winutil.ps_json(script, timeout)
 
 
-def _as_list(x):
-    return [] if x is None else x if isinstance(x, list) else [x]
+_as_list = winutil.as_list
+
+
+def _try(cmd):
+    """Script che risponde 'OK' se il comando riesce, altrimenti 'ERR:' e il motivo."""
+    return f"try {{ {cmd} -ErrorAction Stop | Out-Null; 'OK' }} catch {{ 'ERR:' + $_.Exception.Message }}"
 
 
 SEVERITY = {0: "Sconosciuta", 1: "Bassa", 2: "Media", 4: "Alta", 5: "Grave"}
@@ -53,6 +46,8 @@ class Security:
     def __init__(self):
         self.scan = {"status": "idle"}
         self._demo_threats = []
+        self._lock = threading.Lock()
+        self._gen = 0
 
     # ---------------- stato ----------------
     def status(self):
@@ -67,7 +62,7 @@ class Security:
             "sigAge=$s.AntivirusSignatureAge; sigVer=$s.AntivirusSignatureVersion;"
             "sigUpd=$(if($s.AntivirusSignatureLastUpdated){$s.AntivirusSignatureLastUpdated.ToString('yyyy-MM-dd HH:mm')});"
             "quickAge=$s.QuickScanAge; fullAge=$s.FullScanAge; tamper=$s.IsTamperProtected; av3=$av; fw=$fw }", 60)
-        if not d:
+        if not isinstance(d, dict):
             return {"ok": False, "msg": "Non riesco a leggere lo stato di Microsoft Defender."}
         others = []
         for p in _as_list(d.get("av3")):
@@ -101,11 +96,14 @@ class Security:
             " status=[int]$_.ThreatStatusID } }", 60))
         by_id = {}
         for d in det:
-            by_id.setdefault(d.get("id"), d)
+            if isinstance(d, dict):
+                by_id.setdefault(d.get("id"), d)
         out = []
         for t in threats:
+            if not isinstance(t, dict):
+                continue
             d = by_id.get(t.get("id"), {})
-            res = [r.split("_", 1)[-1] for r in _as_list(d.get("res")) if r][:3]
+            res = [str(r).split("_", 1)[-1] for r in _as_list(d.get("res")) if r][:3]
             out.append({"id": t.get("id"), "name": t.get("name"), "severity": SEVERITY.get(t.get("sev"), "Sconosciuta"),
                         "active": bool(t.get("active")), "ran": bool(t.get("ran")), "when": d.get("when") or "",
                         "files": res})
@@ -116,7 +114,11 @@ class Security:
         if not IS_WINDOWS:
             self._demo_threats = [dict(t, active=False) for t in self._demo_threats]
             return {"ok": True, "msg": "Minacce rimosse."}
-        _ps("Remove-MpThreat -ErrorAction SilentlyContinue", 600)
+        if not [t for t in self.threats() if t["active"]]:
+            return {"ok": True, "msg": "Non ci sono minacce attive da rimuovere."}
+        out = _ps(_try("Remove-MpThreat"), 600)
+        if out.startswith("ERR:"):
+            winutil._log(f"Remove-MpThreat: {out}")
         left = [t for t in self.threats() if t["active"]]
         if left:
             return {"ok": False, "msg": "Non tutte le minacce sono state rimosse: prova un controllo offline."}
@@ -127,25 +129,41 @@ class Security:
         cmds = {"quick": "Start-MpScan -ScanType QuickScan", "full": "Start-MpScan -ScanType FullScan"}
         if kind not in cmds:
             return {"ok": False, "msg": "Tipo di controllo non valido."}
-        if self.scan.get("status") == "running":
-            return {"ok": False, "msg": "Un controllo è già in corso."}
-        self.scan = {"status": "running", "kind": kind, "started": time.time()}
+        with self._lock:
+            if self.scan.get("status") == "running":
+                return {"ok": False, "msg": "Un controllo è già in corso."}
+            self._gen += 1
+            gen = self._gen
+            self.scan = {"status": "running", "kind": kind, "started": time.time()}
 
         def run():
+            error = ""
             if IS_WINDOWS:
-                try:
-                    _ps(cmds[kind] + " -ErrorAction Stop; 'OK'", 24 * 3600)
-                except subprocess.TimeoutExpired:
-                    pass
+                r = winutil.ps_run(_try(cmds[kind]), 24 * 3600)
+                if r.timed_out:
+                    error = "Il controllo non è finito in tempo."
+                elif not r.out.endswith("OK"):
+                    winutil._log(f"Start-MpScan: {r.out[:500]} {r.err[:500]}")
+                    error = ("Microsoft Defender non è riuscito a fare il controllo. Se usi un altro antivirus, "
+                             "fai il controllo da quello.")
             else:
                 time.sleep(6)
                 self._demo_threats = [{"id": "2147735503", "name": "PUA:Win32/Presenoker", "severity": "Bassa",
                                        "active": True, "ran": False, "when": time.strftime("%Y-%m-%d %H:%M"),
                                        "files": [r"C:\Users\Demo\Downloads\FreeGameBooster_setup.exe"]}]
-            if self.scan.get("status") == "running":
+            with self._lock:
+                if gen != self._gen or self.scan.get("status") != "running":
+                    return   # annullato, o è partito un altro controllo nel frattempo
+                started = self.scan["started"]
+            if error:
+                result = {"status": "error", "kind": kind, "msg": error}
+            else:
                 found = [t for t in self.threats() if t["active"]]
-                self.scan = {"status": "done", "kind": kind, "found": len(found),
-                             "seconds": int(time.time() - self.scan["started"])}
+                result = {"status": "done", "kind": kind, "found": len(found),
+                          "seconds": int(time.time() - started)}
+            with self._lock:
+                if gen == self._gen and self.scan.get("status") == "running":
+                    self.scan = result
         threading.Thread(target=run, daemon=True).start()
         return {"ok": True}
 
@@ -156,16 +174,18 @@ class Security:
         return s
 
     def cancel_scan(self):
+        with self._lock:
+            self._gen += 1
+            self.scan = {"status": "cancelled"}
         if IS_WINDOWS and os.path.exists(MPCMD):
-            subprocess.run([MPCMD, "-Cancel"], capture_output=True, creationflags=CREATE_NO_WINDOW)
-        self.scan = {"status": "cancelled"}
+            winutil.run([MPCMD, "-Cancel"], timeout=30, log_errors=False)
         return {"ok": True, "msg": "Controllo annullato."}
 
     def update_signatures(self):
         if not IS_WINDOWS:
             time.sleep(1)
             return {"ok": True, "msg": "Definizioni aggiornate."}
-        out = _ps("try { Update-MpSignature -ErrorAction Stop; 'OK' } catch { $_.Exception.Message }", 900)
+        out = _ps(_try("Update-MpSignature"), 900)
         if out.endswith("OK"):
             return {"ok": True, "msg": "Definizioni dei virus aggiornate."}
         return {"ok": False, "msg": "Aggiornamento non riuscito: controlla la connessione e riprova."}
@@ -174,7 +194,11 @@ class Security:
         """Riavvia il PC e controlla prima che parta Windows (trova i virus che si nascondono)."""
         if not IS_WINDOWS:
             return {"ok": True, "msg": "Demo: il PC si riavvierebbe per il controllo offline."}
-        _ps("Start-MpWDOScan", 60)
+        out = _ps(_try("Start-MpWDOScan"), 60)
+        if not out.endswith("OK"):
+            winutil._log(f"Start-MpWDOScan: {out}")
+            return {"ok": False, "msg": "Non riesco ad avviare il controllo offline: avvialo da Sicurezza di Windows → "
+                                        "Protezione da virus e minacce → Opzioni di analisi."}
         return {"ok": True, "msg": "Il PC si riavvia tra poco per il controllo offline (circa 15 minuti)."}
 
     def enable_realtime(self):
@@ -189,6 +213,10 @@ class Security:
         if not IS_WINDOWS:
             return {"ok": True, "msg": "Firewall attivato."}
         _ps("Set-NetFirewallProfile -All -Enabled True -ErrorAction SilentlyContinue", 60)
+        off = [f["name"] for f in self.status().get("firewall", []) if not f.get("on")]
+        if off:
+            return {"ok": False, "msg": "Non riesco ad attivare il firewall (" + ", ".join(off) + "): "
+                                        "forse lo gestisce un altro antivirus."}
         return {"ok": True, "msg": "Firewall attivato su tutte le reti."}
 
     @staticmethod
@@ -224,6 +252,8 @@ def disk_health():
             " errors=([int]$r.ReadErrorsUncorrected + [int]$r.WriteErrorsUncorrected); letters=$l } }", 90))
         disks = []
         for r in rows:
+            if not isinstance(r, dict):
+                continue
             media, bus = r.get("media") or "", r.get("bus") or ""
             kind = "SSD NVMe" if bus == "NVMe" else "SSD" if media == "SSD" else "HDD" if media == "HDD" else \
                 "USB" if bus == "USB" else "Disco"
@@ -243,5 +273,7 @@ def disk_health():
             d["status"], d["note"] = "warn", "Il disco è molto caldo: controlla l'aerazione del PC."
         else:
             d["status"], d["note"] = "ok", "Tutto a posto."
-        d["life"] = None if d.get("wear") is None else max(0, 100 - int(d["wear"]))
+        # la "vita residua" ha senso solo per gli SSD (gli hard disk non la segnalano davvero)
+        wear = d.get("wear")
+        d["life"] = None if wear is None or not d["kind"].startswith("SSD") else max(0, 100 - int(wear))
     return disks

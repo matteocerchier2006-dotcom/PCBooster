@@ -8,21 +8,16 @@ menu Start), l'app parte senza permessi, avvia l'attività e si chiude: la fines
 """
 import os
 import sys
-import subprocess
+
+import winutil
 
 IS_WINDOWS = sys.platform == "win32"
 IS_FROZEN = getattr(sys, "frozen", False)
-CREATE_NO_WINDOW = 0x08000000
 TASK = "PC Booster - Avvio"
 
 
 def _ps(script, timeout=90):
-    if not IS_WINDOWS:
-        return ""
-    r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
-                       capture_output=True, text=True, errors="replace", timeout=timeout,
-                       creationflags=CREATE_NO_WINDOW)
-    return (r.stdout or "").strip()
+    return winutil.ps(script, timeout)
 
 
 def _q(s):
@@ -32,19 +27,17 @@ def _q(s):
 def task_exists():
     if not IS_WINDOWS:
         return False
-    r = subprocess.run(["schtasks", "/Query", "/TN", TASK], capture_output=True, creationflags=CREATE_NO_WINDOW)
-    return r.returncode == 0
+    return winutil.run(["schtasks", "/Query", "/TN", TASK], timeout=20, log_errors=False).ok
 
 
 def task_target():
     """Il programma che l'attività avvia (per controllare che esista ancora)."""
     if not IS_WINDOWS:
         return ""
-    r = subprocess.run(["schtasks", "/Query", "/TN", TASK, "/XML"], capture_output=True, creationflags=CREATE_NO_WINDOW)
-    if r.returncode != 0:
+    r = winutil.run(["schtasks", "/Query", "/TN", TASK, "/XML"], timeout=20, log_errors=False)
+    if not r.ok:
         return ""
-    raw = r.stdout
-    text = raw.decode("utf-16", "replace") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else raw.decode("utf-8", "replace")
+    text = r.out.replace("\x00", "")
     import re
     m = re.search(r"<Command>(.*?)</Command>", text, re.S)
     return m.group(1).strip().strip('"') if m else ""
@@ -57,8 +50,7 @@ def run_task():
     target = task_target()
     if not target or not os.path.isfile(target):
         return False
-    r = subprocess.run(["schtasks", "/Run", "/TN", TASK], capture_output=True, creationflags=CREATE_NO_WINDOW)
-    return r.returncode == 0
+    return winutil.run(["schtasks", "/Run", "/TN", TASK], timeout=20).ok
 
 
 SHORTCUT_PS = r"""
@@ -96,7 +88,7 @@ def enable():
 def disable():
     if not IS_WINDOWS:
         return {"ok": True, "msg": "Disattivato."}
-    subprocess.run(["schtasks", "/Delete", "/TN", TASK, "/F"], capture_output=True, creationflags=CREATE_NO_WINDOW)
+    winutil.run(["schtasks", "/Delete", "/TN", TASK, "/F"], timeout=20, log_errors=False)
     return {"ok": True, "msg": "Fatto: Windows chiederà di nuovo i permessi a ogni avvio."}
 
 

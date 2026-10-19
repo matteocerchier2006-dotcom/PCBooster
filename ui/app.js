@@ -1,3 +1,7 @@
+// Gli errori dell'interfaccia finiscono in errori.log (per "Segnala un problema")
+window.addEventListener('error', e => { try { api && api.log_ui_error(`${e.message} @ ${e.filename}:${e.lineno}`); } catch (_) {} });
+window.addEventListener('unhandledrejection', e => { try { api && api.log_ui_error(`promessa: ${e.reason}`); } catch (_) {} });
+
 // PC Booster - logica dell'interfaccia
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -7,9 +11,35 @@ const root = document.documentElement;
 let api;
 const state = { prefs: {}, system: null, gpus: null, junk: null, updates: null, startup: null, apps: [], appFilter: 'all', large: [], view: null };
 
+// Ogni chiamata a Python passa da qui: se qualcosa va storto viene scritto nel registro errori
+// e appare un avviso, invece di lasciare la pagina bloccata su "Leggo…".
+function wrapApi(raw) {
+  return new Proxy(raw, {
+    get(target, name) {
+      const f = target[name];
+      if (typeof f !== 'function') return f;
+      return (...args) => {
+        let p;
+        try { p = f.apply(target, args); } catch (err) { p = Promise.reject(err); }
+        return Promise.resolve(p).catch(err => {
+          const msg = (err && (err.message || err.name)) || String(err);
+          if (name !== 'log_ui_error') {
+            try { target.log_ui_error(`api.${String(name)}: ${msg}`); } catch (_) {}
+            toast('Qualcosa non ha funzionato: riprova. Se succede ancora, crea un report dalle Impostazioni.', false);
+          }
+          throw err;
+        });
+      };
+    }
+  });
+}
+
 // ---------- avvio: aspetta il ponte con Python ----------
+let started = false;
 async function ready() {
-  api = window.pywebview.api;
+  if (started || !(window.pywebview && window.pywebview.api)) return;
+  started = true;
+  api = wrapApi(window.pywebview.api);
   state.prefs = await api.get_prefs();
   applyPrefs();
   bindSettings();
@@ -130,6 +160,9 @@ function go(view) {
   if (view === 'apps' && !state.apps.length) loadApps();
   if (view === 'settings') loadSettingsView();
   if (view === 'game') loadGame();
+  if (view === 'install') loadCatalog();
+  if (view === 'net') loadNet();
+  if (view === 'history') loadHistory();
   if (view === 'security') loadSecurity();
   if (view === 'disk') loadDiskHealth();
 }
@@ -178,86 +211,104 @@ async function runCheckup() {
   const list = $('#findingsList'); list.innerHTML = '';
   $('#findingsEmpty').hidden = true;
   setScore(null); $('#scoreLabel').textContent = 'Analisi in corso…';
+  const t0 = performance.now();
   let penalty = 0;
   const steps = {
     gpu: addFinding('pending', 'Controllo il driver della scheda video…'),
     junk: addFinding('pending', 'Cerco file inutili…'),
     tw: addFinding('pending', 'Controllo le impostazioni per i giochi…'),
     st: addFinding('pending', 'Controllo i programmi all\'avvio…'),
-    upd: addFinding('pending', 'Chiedo a Windows Update se ci sono driver e aggiornamenti…'),
-    wg: addFinding('pending', 'Controllo se i tuoi programmi sono aggiornati…'),
+    space: addFinding('pending', 'Controllo lo spazio sul disco…'),
     sec: addFinding('pending', 'Controllo antivirus e firewall…'),
     dh: addFinding('pending', 'Controllo la salute dei dischi…'),
+    upd: addFinding('pending', 'Chiedo a Windows Update se ci sono driver e aggiornamenti…'),
+    wg: addFinding('pending', 'Controllo se i tuoi programmi sono aggiornati…'),
   };
-
-  const gpus = await api.get_gpu_info(); state.gpus = gpus;
-  const main = gpus.find(g => (g.vendor === 'nvidia' || g.vendor === 'amd') && (g.kind === 'Dedicata' || gpus.length === 1));
-  const dr = main ? await checkDriver(main, true) : null;
-  const old = gpus.filter(g => g.status === 'warn' && g.kind === 'Dedicata');
-  if (dr && dr.ok && dr.update) { penalty += 10; fillFinding(steps.gpu, 'warn', `Nuovo driver per ${main.name}: ${dr.version}`, `Tu hai il ${dr.installed}. I driver nuovi migliorano le prestazioni nei giochi recenti.`, 'Installa', () => go('gpu')); }
-  else if (dr && dr.ok && !dr.unknown_installed) fillFinding(steps.gpu, 'ok', 'Hai l\'ultimo driver della scheda video', `${main.name} · ${dr.version}`);
-  else if (old.length) { penalty += 10; fillFinding(steps.gpu, 'warn', `Driver di ${old[0].name} di ${old[0].age_days} giorni fa`, 'Probabilmente ne è uscito uno più nuovo, con miglioramenti per i giochi recenti.', 'Vai al driver', () => go('gpu')); }
-  else fillFinding(steps.gpu, 'ok', 'Driver della scheda video recente', gpus.filter(g => g.kind === 'Dedicata').map(g => `${g.name} · ${g.driver_version}`).join(', ') || gpus.map(g => g.name).join(', '));
-
-  const junk = await api.scan_junk(); state.junk = junk; renderJunk();
-  const total = junk.items.filter(i => i.default).reduce((a, j) => a + (j.bytes || 0), 0);
-  if (total > 1024 ** 3) { penalty += 15; fillFinding(steps.junk, 'warn', `${fmtBytes(total)} di file inutili`, 'Temporanei, cache e vecchi aggiornamenti che puoi eliminare senza rischi.', 'Pulisci', () => go('clean')); }
-  else if (total > 300 * 1024 ** 2) { penalty += 6; fillFinding(steps.junk, 'warn', `${fmtBytes(total)} di file inutili`, 'Una pulizia veloce libera un po\' di spazio.', 'Pulisci', () => go('clean')); }
-  else fillFinding(steps.junk, 'ok', 'Il PC è pulito', `Solo ${fmtBytes(total)} di file temporanei.`);
-
-  const tw = await api.get_gpu_tweaks();
-  const missing = [['game_mode', true, 'Modalità Gioco'], ['hags', true, 'pianificazione GPU'], ['high_perf', true, 'Prestazioni elevate'], ['game_dvr', false, 'registrazione in background spenta']]
-    .filter(([k, want]) => !!tw[k] !== want).map(x => x[2]);
-  if (missing.length) { penalty += missing.length * 3; fillFinding(steps.tw, 'warn', `${missing.length} ${plural(missing.length, 'ottimizzazione', 'ottimizzazioni')} per i giochi non ${plural(missing.length, 'attiva', 'attive')}`, 'Mancano: ' + missing.join(', ') + '.', 'Ottimizza', () => $('#optimizeBtn').click()); }
-  else fillFinding(steps.tw, 'ok', 'Impostazioni per i giochi a posto', 'Tutte le ottimizzazioni sono attive.');
-
-  const st = await api.list_startup(); state.startup = st;
-  const heavy = st.filter(x => x.enabled && x.suggest === 'off');
-  if (heavy.length) { penalty += Math.min(10, heavy.length * 2); fillFinding(steps.st, 'warn', `${heavy.length} ${plural(heavy.length, 'programma parte', 'programmi partono')} da soli all'accensione`, heavy.slice(0, 4).map(x => x.name).join(', ') + (heavy.length > 4 ? '…' : ''), 'Disattiva', () => go('startup')); }
-  else fillFinding(steps.st, 'ok', 'Avvio leggero', 'Nessun programma inutile parte con Windows.');
-
-  const s = state.system;
-  if (s && s.disk_total_gb) {
-    const free = s.disk_free_gb / s.disk_total_gb;
-    if (free < 0.1) { penalty += 20; addFinding('bad', `Disco di sistema quasi pieno (${s.disk_free_gb} GB liberi)`, 'Windows rallenta quando il disco è pieno. Cerca i file grandi o disinstalla qualche gioco.', 'Libera spazio', () => go('disk')); }
-    else if (free < 0.2) { penalty += 8; addFinding('warn', `Poco spazio sul disco di sistema (${s.disk_free_gb} GB liberi)`, 'Conviene liberare un po\' di spazio.', 'Libera spazio', () => go('disk')); }
-  }
-
-  const r = await api.check_updates();
-  if (!r.ok) fillFinding(steps.upd, 'bad', 'Windows Update non ha risposto', r.msg);
-  else {
-    state.updates = r.updates; renderUpdates();
-    const drv = r.updates.filter(u => u.category !== 'system').length;
-    if (r.updates.length) { penalty += 8 + drv * 3; fillFinding(steps.upd, 'warn', `${r.updates.length} ${plural(r.updates.length, 'aggiornamento disponibile', 'aggiornamenti disponibili')}` + (drv ? `, di cui ${drv} driver` : ''), r.updates.slice(0, 2).map(u => u.title).join(' — '), 'Installa', () => go('updates')); }
-    else fillFinding(steps.upd, 'ok', 'Windows e i driver sono aggiornati', 'Nessun aggiornamento in sospeso.');
-  }
-  const sec = await api.security_status(); state.sec = sec;
-  const thr = (await api.security_threats()).filter(t => t.active);
-  if (sec.ok || sec.other_av) {
-    const avOn = sec.realtime || (sec.other_av || []).some(a => a.on);
-    const fwOff = (sec.firewall || []).filter(f => !f.on).length;
-    if (thr.length) { penalty += 25; fillFinding(steps.sec, 'bad', `${thr.length} ${plural(thr.length, 'minaccia trovata', 'minacce trovate')}`, thr.map(t => t.name).slice(0, 2).join(', '), 'Rimuovi', () => go('security')); }
-    else if (!avOn) { penalty += 20; fillFinding(steps.sec, 'bad', 'La protezione antivirus è spenta', 'Il PC non è protetto dai virus in questo momento.', 'Attiva', () => go('security')); }
-    else if (fwOff) { penalty += 10; fillFinding(steps.sec, 'bad', 'Il firewall è spento', 'Il firewall blocca gli accessi indesiderati da internet.', 'Attiva', () => go('security')); }
-    else if (sec.realtime && sec.sig_age_days > 3) { penalty += 5; fillFinding(steps.sec, 'warn', `Definizioni dei virus vecchie di ${sec.sig_age_days} giorni`, 'Aggiornale per riconoscere i virus più nuovi.', 'Aggiorna', () => go('security')); }
-    else fillFinding(steps.sec, 'ok', 'Il PC è protetto', sec.realtime ? 'Microsoft Defender attivo, definizioni aggiornate, firewall acceso.' : `Antivirus attivo: ${(sec.other_av || []).filter(a => a.on).map(a => a.name).join(', ')}.`);
-  } else fillFinding(steps.sec, 'warn', 'Non riesco a leggere lo stato dell\'antivirus', sec.msg || '');
-  setSecDot(sec, thr);
-
-  const disks = await api.disk_health(); state.disks = disks;
-  const badDisk = disks.find(d => d.status === 'bad'), warnDisk = disks.find(d => d.status === 'warn');
-  if (badDisk) { penalty += 20; fillFinding(steps.dh, 'bad', `Il disco ${badDisk.name} ha un problema`, badDisk.note, 'Vedi', () => go('disk')); }
-  else if (warnDisk) { penalty += 8; fillFinding(steps.dh, 'warn', `Attenzione al disco ${warnDisk.name}`, warnDisk.note, 'Vedi', () => go('disk')); }
-  else fillFinding(steps.dh, 'ok', 'Dischi in salute', disks.map(d => `${d.name}${d.life != null ? ` · vita ${d.life}%` : ''}`).join(', '));
-
-  const wg = await api.list_app_updates();
-  if (!wg.ok) fillFinding(steps.wg, 'warn', 'Non riesco a controllare i programmi', wg.msg);
-  else {
-    state.wg = wg.apps; renderWinget();
-    if (wg.apps.length) { penalty += Math.min(10, wg.apps.length * 2); fillFinding(steps.wg, 'warn', `${wg.apps.length} ${plural(wg.apps.length, 'programma da aggiornare', 'programmi da aggiornare')}`, wg.apps.slice(0, 4).map(a => a.name).join(', ') + (wg.apps.length > 4 ? '…' : ''), 'Aggiorna', () => go('updates')); }
-    else fillFinding(steps.wg, 'ok', 'Tutti i programmi sono aggiornati', 'Nessuna versione nuova da installare.');
-  }
+  // Ogni controllo parte subito, insieme agli altri: il più lento non blocca più i veloci
+  const run = (step, fn) => fn().catch(e => {
+    api.log_ui_error(`check-up (${step}): ${e}`);
+    fillFinding(steps[step], 'warn', 'Questo controllo non è riuscito', 'Riprova più tardi.');
+  });
+  await Promise.all([
+    run('gpu', async () => {
+      const gpus = await api.get_gpu_info(); state.gpus = gpus;
+      const main = gpus.find(g => (g.vendor === 'nvidia' || g.vendor === 'amd') && (g.kind === 'Dedicata' || gpus.length === 1));
+      const dr = main ? await checkDriver(main, true) : null;
+      const old = gpus.filter(g => g.status === 'warn' && g.kind === 'Dedicata');
+      if (dr && dr.ok && dr.update) { penalty += 10; fillFinding(steps.gpu, 'warn', `Nuovo driver per ${main.name}: ${dr.version}`, `Tu hai il ${dr.installed}. I driver nuovi migliorano le prestazioni nei giochi recenti.`, 'Installa', () => go('gpu')); }
+      else if (dr && dr.ok && !dr.unknown_installed) fillFinding(steps.gpu, 'ok', 'Hai l\'ultimo driver della scheda video', `${main.name} · ${dr.version}`);
+      else if (old.length) { penalty += 10; fillFinding(steps.gpu, 'warn', `Driver di ${old[0].name} di ${old[0].age_days} giorni fa`, 'Probabilmente ne è uscito uno più nuovo, con miglioramenti per i giochi recenti.', 'Vai al driver', () => go('gpu')); }
+      else fillFinding(steps.gpu, 'ok', 'Driver della scheda video recente', gpus.filter(g => g.kind === 'Dedicata').map(g => `${g.name} · ${g.driver_version}`).join(', ') || gpus.map(g => g.name).join(', '));
+    }),
+    run('junk', async () => {
+      const junk = await api.scan_junk(); state.junk = junk; renderJunk();
+      const total = junk.items.filter(i => i.default).reduce((a, j) => a + (j.bytes || 0), 0);
+      if (total > 1024 ** 3) { penalty += 15; fillFinding(steps.junk, 'warn', `${fmtBytes(total)} di file inutili`, 'Temporanei, cache e vecchi aggiornamenti che puoi eliminare senza rischi.', 'Pulisci', () => go('clean')); }
+      else if (total > 300 * 1024 ** 2) { penalty += 6; fillFinding(steps.junk, 'warn', `${fmtBytes(total)} di file inutili`, 'Una pulizia veloce libera un po\' di spazio.', 'Pulisci', () => go('clean')); }
+      else fillFinding(steps.junk, 'ok', 'Il PC è pulito', `Solo ${fmtBytes(total)} di file temporanei.`);
+    }),
+    run('tw', async () => {
+      const tw = await api.get_gpu_tweaks();
+      const missing = [['game_mode', true, 'Modalità Gioco'], ['hags', true, 'pianificazione GPU'], ['high_perf', true, 'Prestazioni elevate'], ['game_dvr', false, 'registrazione in background spenta']]
+        .filter(([k, want]) => !!tw[k] !== want).map(x => x[2]);
+      if (missing.length) { penalty += missing.length * 3; fillFinding(steps.tw, 'warn', `${missing.length} ${plural(missing.length, 'ottimizzazione', 'ottimizzazioni')} per i giochi non ${plural(missing.length, 'attiva', 'attive')}`, 'Mancano: ' + missing.join(', ') + '.', 'Ottimizza', () => $('#optimizeBtn').click()); }
+      else fillFinding(steps.tw, 'ok', 'Impostazioni per i giochi a posto', 'Tutte le ottimizzazioni sono attive.');
+    }),
+    run('st', async () => {
+      const st = await api.list_startup(); state.startup = st;
+      const heavy = st.filter(x => x.enabled && x.suggest === 'off');
+      if (heavy.length) { penalty += Math.min(10, heavy.length * 2); fillFinding(steps.st, 'warn', `${heavy.length} ${plural(heavy.length, 'programma parte', 'programmi partono')} da soli all'accensione`, heavy.slice(0, 4).map(x => x.name).join(', ') + (heavy.length > 4 ? '…' : ''), 'Disattiva', () => go('startup')); }
+      else fillFinding(steps.st, 'ok', 'Avvio leggero', 'Nessun programma inutile parte con Windows.');
+    }),
+    run('space', async () => {
+      const s = state.system || await api.get_system_info();
+      const free = s.disk_total_gb ? s.disk_free_gb / s.disk_total_gb : 1;
+      if (free < 0.1) { penalty += 20; fillFinding(steps.space, 'bad', `Disco di sistema quasi pieno (${s.disk_free_gb} GB liberi)`, 'Windows rallenta quando il disco è pieno. Cerca i file grandi o disinstalla qualche gioco.', 'Libera spazio', () => go('disk')); }
+      else if (free < 0.2) { penalty += 8; fillFinding(steps.space, 'warn', `Poco spazio sul disco di sistema (${s.disk_free_gb} GB liberi)`, 'Conviene liberare un po\' di spazio.', 'Libera spazio', () => go('disk')); }
+      else fillFinding(steps.space, 'ok', 'Spazio sul disco a posto', `${s.disk_free_gb} GB liberi su ${s.disk_total_gb} GB.`);
+    }),
+    run('sec', async () => {
+      const [sec, all] = await Promise.all([api.security_status(), api.security_threats()]);
+      state.sec = sec; const thr = all.filter(t => t.active);
+      if (sec.ok || sec.other_av) {
+        const avOn = sec.realtime || (sec.other_av || []).some(a => a.on);
+        const fwOff = (sec.firewall || []).filter(f => !f.on).length;
+        if (thr.length) { penalty += 25; fillFinding(steps.sec, 'bad', `${thr.length} ${plural(thr.length, 'minaccia trovata', 'minacce trovate')}`, thr.map(t => t.name).slice(0, 2).join(', '), 'Rimuovi', () => go('security')); }
+        else if (!avOn) { penalty += 20; fillFinding(steps.sec, 'bad', 'La protezione antivirus è spenta', 'Il PC non è protetto dai virus in questo momento.', 'Attiva', () => go('security')); }
+        else if (fwOff) { penalty += 10; fillFinding(steps.sec, 'bad', 'Il firewall è spento', 'Il firewall blocca gli accessi indesiderati da internet.', 'Attiva', () => go('security')); }
+        else if (sec.realtime && sec.sig_age_days > 3) { penalty += 5; fillFinding(steps.sec, 'warn', `Definizioni dei virus vecchie di ${sec.sig_age_days} giorni`, 'Aggiornale per riconoscere i virus più nuovi.', 'Aggiorna', () => go('security')); }
+        else fillFinding(steps.sec, 'ok', 'Il PC è protetto', sec.realtime ? 'Microsoft Defender attivo, definizioni aggiornate, firewall acceso.' : `Antivirus attivo: ${(sec.other_av || []).filter(a => a.on).map(a => a.name).join(', ')}.`);
+      } else fillFinding(steps.sec, 'warn', 'Non riesco a leggere lo stato dell\'antivirus', sec.msg || '');
+      setSecDot(sec, thr);
+    }),
+    run('dh', async () => {
+      const disks = await api.disk_health(); state.disks = disks;
+      const badDisk = disks.find(d => d.status === 'bad'), warnDisk = disks.find(d => d.status === 'warn');
+      if (badDisk) { penalty += 20; fillFinding(steps.dh, 'bad', `Il disco ${badDisk.name} ha un problema`, badDisk.note, 'Vedi', () => go('disk')); }
+      else if (warnDisk) { penalty += 8; fillFinding(steps.dh, 'warn', `Attenzione al disco ${warnDisk.name}`, warnDisk.note, 'Vedi', () => go('disk')); }
+      else fillFinding(steps.dh, 'ok', 'Dischi in salute', disks.map(d => `${d.name}${d.life != null ? ` · vita ${d.life}%` : ''}`).join(', '));
+    }),
+    run('upd', async () => {
+      const r = await api.check_updates();
+      if (!r.ok) return fillFinding(steps.upd, 'bad', 'Windows Update non ha risposto', r.msg);
+      state.updates = r.updates; renderUpdates();
+      const drv = r.updates.filter(u => u.category !== 'system').length;
+      if (r.updates.length) { penalty += 8 + drv * 3; fillFinding(steps.upd, 'warn', `${r.updates.length} ${plural(r.updates.length, 'aggiornamento disponibile', 'aggiornamenti disponibili')}` + (drv ? `, di cui ${drv} driver` : ''), r.updates.slice(0, 2).map(u => u.title).join(' — '), 'Installa', () => go('updates')); }
+      else fillFinding(steps.upd, 'ok', 'Windows e i driver sono aggiornati', 'Nessun aggiornamento in sospeso.');
+    }),
+    run('wg', async () => {
+      const wg = await api.list_app_updates();
+      if (!wg.ok) return fillFinding(steps.wg, 'warn', 'Non riesco a controllare i programmi', wg.msg);
+      state.wg = wg.apps; renderWinget();
+      if (wg.apps.length) { penalty += Math.min(10, wg.apps.length * 2); fillFinding(steps.wg, 'warn', `${wg.apps.length} ${plural(wg.apps.length, 'programma da aggiornare', 'programmi da aggiornare')}`, wg.apps.slice(0, 4).map(a => a.name).join(', ') + (wg.apps.length > 4 ? '…' : ''), 'Aggiorna', () => go('updates')); }
+      else fillFinding(steps.wg, 'ok', 'Tutti i programmi sono aggiornati', 'Nessuna versione nuova da installare.');
+    }),
+  ]);
+  // prima i problemi, poi le cose a posto
+  const order = { bad: 0, warn: 1, ok: 2, pending: 3 };
+  [...list.children].sort((x, y) => order[x.className.split(' ')[1]] - order[y.className.split(' ')[1]]).forEach(li => list.append(li));
   setScore(Math.max(0, Math.min(100, 100 - penalty)));
+  toast(`Analisi finita in ${Math.round((performance.now() - t0) / 1000)} secondi.`);
 }
 function addFinding(lvl, title, text, action, fn) {
   const li = h('li', 'finding ' + lvl); $('#findingsList').append(li); fillFinding(li, lvl, title, text, action, fn); return li;
@@ -485,6 +536,8 @@ async function startDriverDownload(g, r, box) {
       const pct = st.total ? Math.round(st.done / st.total * 100) : 0;
       em.style.width = pct + '%';
       p.textContent = `Download in corso: ${fmtBytes(st.done)}` + (st.total ? ` di ${fmtBytes(st.total)} (${pct}%)` : '');
+    } else if (st.status === 'installing') {
+      em.style.width = '100%'; p.textContent = st.msg || 'Controllo il file scaricato…';
     } else {
       clearInterval(t);
       if (st.status === 'launched') { em.style.width = '100%'; p.textContent = st.msg; toast(st.msg); }
@@ -851,13 +904,16 @@ function showScan(p) {
       if (s.found) p.append(h('b', null, `${name} finito: ${s.found} ${plural(s.found, 'minaccia trovata', 'minacce trovate')}. `), h('span', null, 'Rimuovile dall\'elenco qui sotto.'));
       else p.append(h('b', null, `${name} finito: nessuna minaccia. `), h('span', null, `Durata: ${Math.max(1, Math.round(s.seconds / 60))} min.`));
       box.append(p);
+    } else if (s.status === 'error') {
+      const p = h('p'); p.append(h('b', null, `${name} non riuscito. `), h('span', null, s.msg || ''));
+      box.append(p);
     } else { box.hidden = true; }
   };
   paint(p);
   clearInterval(scanTimer);
   scanTimer = setInterval(async () => {
     const s = await api.security_progress(); paint(s);
-    if (s.status !== 'running') { clearInterval(scanTimer); $$('.scan-opt').forEach(b => b.disabled = false); if (s.status === 'done') { toast(s.found ? 'Trovate delle minacce: controlla l\'elenco.' : 'Controllo finito: nessuna minaccia.', !s.found); loadSecurity(); } }
+    if (s.status !== 'running') { clearInterval(scanTimer); $$('.scan-opt').forEach(b => b.disabled = false); if (s.status === 'done') { toast(s.found ? 'Trovate delle minacce: controlla l\'elenco.' : 'Controllo finito: nessuna minaccia.', !s.found); loadSecurity(); } else if (s.status === 'error') toast(s.msg || 'Controllo non riuscito.', false); }
   }, 1000);
 }
 
@@ -888,3 +944,185 @@ function renderDiskHealth() {
   box.append(wrap);
 }
 $('#healthRefresh').addEventListener('click', e => busy(e.currentTarget, () => loadDiskHealth(true)));
+
+// ================= Installa app =================
+let catalog = null;
+async function loadCatalog(force = false) {
+  if (catalog && !force) return renderCatalog();
+  $('#catalog').innerHTML = '<p class="empty">Controllo quali programmi hai già… può volerci qualche secondo.</p>';
+  const r = await api.app_catalog();
+  if (!r.ok) {
+    $('#catalog').innerHTML = ''; $('#catalog').append(h('p', 'empty', r.msg));
+    if (r.missing) { const b = h('button', 'btn small', 'Apri il Microsoft Store'); b.style.marginTop = '10px'; b.onclick = () => api.open_winget_store(); $('#catalog').append(b); }
+    return;
+  }
+  catalog = r.categories; renderCatalog();
+}
+function renderCatalog() {
+  const box = $('#catalog'); box.innerHTML = '';
+  catalog.forEach(cat => {
+    const g = h('div', 'catgroup'); g.append(h('h2', null, cat.name));
+    const grid = h('div', 'appgrid');
+    cat.apps.forEach(a => {
+      const card = h('label', 'appcard' + (a.installed ? ' done' : '')); card.dataset.id = a.id; card.dataset.name = a.name;
+      const cb = h('input', 'ck'); cb.type = 'checkbox'; cb.disabled = a.installed;
+      cb.onchange = () => { card.classList.toggle('sel', cb.checked); updateInstallBar(); };
+      const title = h('b', null, a.name);
+      if (a.installed) title.append(h('span', 'tag ok', 'Installata'));
+      card.append(cb, title, h('span', null, a.desc));
+      grid.append(card);
+    });
+    g.append(grid); box.append(g);
+  });
+  updateInstallBar();
+}
+function updateInstallBar() {
+  const n = $$('#catalog .appcard input:checked').length;
+  $('#installBar').hidden = !n; $('#installCount').textContent = n;
+}
+$('#catRefresh').addEventListener('click', e => busy(e.currentTarget, () => loadCatalog(true)));
+$('#installBtn').addEventListener('click', e => busy(e.currentTarget, async () => {
+  const cards = $$('#catalog .appcard').filter(c => $('input', c).checked);
+  let ok = 0;
+  for (const c of cards) {
+    const title = $('b', c); $$('.tag', title).forEach(t => t.remove());
+    title.append(h('span', 'tag acc', 'Installo…'));
+    const r = await api.install_app(c.dataset.id, c.dataset.name);
+    $$('.tag', title).forEach(t => t.remove());
+    const inp = $('input', c);
+    if (r.ok) { ok++; inp.checked = false; inp.disabled = true; c.classList.remove('sel'); c.classList.add('done'); title.append(h('span', 'tag ok', 'Installata'));
+      catalog.forEach(cat => cat.apps.forEach(a => { if (a.id === c.dataset.id) a.installed = true; })); }
+    else { const t = h('span', 'tag warn', 'Non riuscita'); t.title = r.msg; title.append(t); }
+    updateInstallBar();
+  }
+  toast(`${ok} su ${cards.length} ${plural(cards.length, 'app installata', 'app installate')}.`, ok > 0);
+}));
+
+// ================= Rete =================
+let netLoaded = false;
+async function loadNet() {
+  if (netLoaded) return; netLoaded = true;
+  const info = await api.network_info();
+  const box = $('#netInfo'); box.innerHTML = '';
+  if (!info.adapters || !info.adapters.length) { box.append(h('p', 'empty', 'Nessuna connessione a internet trovata.')); return; }
+  info.adapters.forEach(a => {
+    const c = h('div', 'netcard');
+    const cell = (k, v) => { const d = h('div'); d.append(h('span', null, k), h('b', null, v || 'n.d.')); c.append(d); };
+    cell('Connessione', a.kind === 'Wi-Fi' ? `Wi-Fi${a.ssid ? ' · ' + a.ssid : ''}` : 'Cavo (Ethernet)');
+    cell('Velocità della scheda', a.speed);
+    if (a.signal != null) cell('Segnale Wi-Fi', a.signal + '%');
+    cell('Indirizzo nel PC', a.ip);
+    cell('DNS', (a.dns_auto ? 'Automatici · ' : '') + (a.dns || []).join(', '));
+    box.append(c);
+    if (a.kind === 'Wi-Fi') box.append(h('p', 'nettip', a.signal != null && a.signal < 60
+      ? 'Il segnale Wi-Fi è debole: avvicinati al router o, meglio ancora, usa un cavo. Per giocare il cavo è sempre più stabile.'
+      : 'Sei in Wi-Fi: per giocare online un cavo di rete dà un ping più basso e più stabile.'));
+  });
+  measurePing();
+}
+async function measurePing() {
+  const box = $('#pingList'); box.innerHTML = '<p class="empty">Misuro…</p>';
+  const rows = await api.network_ping(); box.innerHTML = '';
+  rows.forEach(r => {
+    const row = h('div', 'pingrow');
+    const name = h('div'); name.append(h('div', null, r.name));
+    const bar = h('div', 'pbar'), em = h('em', r.ms == null || r.ms >= 100 ? 'bad' : r.ms >= 60 ? 'warn' : '');
+    em.style.width = r.ms == null ? '100%' : Math.min(100, r.ms / 1.5) + '%'; bar.append(em);
+    const ms = h('b', null, r.ms == null ? '—' : r.ms + ' ms');
+    const q = h('div'); q.append(h('span', 'tag ' + (r.ms == null || r.ms >= 100 ? 'warn' : r.ms >= 60 ? 'muted' : 'ok'), r.quality));
+    if (r.jitter != null && r.ms != null) q.append(h('span', 'meta', ` ±${r.jitter} ms`));
+    row.append(name, bar, ms, q); box.append(row);
+  });
+}
+$('#pingBtn').addEventListener('click', e => busy(e.currentTarget, measurePing));
+$('#spBtn').addEventListener('click', e => {
+  const btn = e.currentTarget;
+  busy(btn, async () => {
+    const r = await api.speedtest_start(); if (!r.ok) return toast(r.msg, false);
+    ['#spDown', '#spUp', '#spPing'].forEach(s => $(s).textContent = '–');
+    await new Promise(resolve => {
+      const t = setInterval(async () => {
+        const s = await api.speedtest_progress();
+        const names = { ping: 'Misuro il ping…', download: 'Misuro il download…', upload: 'Misuro l\'upload…' };
+        $('#spText').textContent = s.status === 'running' ? names[s.phase] : '';
+        $$('.speed-nums > div').forEach(d => d.classList.remove('live'));
+        if (s.ping != null) $('#spPing').textContent = s.ping;
+        if (s.down != null) $('#spDown').textContent = Math.round(s.down);
+        else if (s.phase === 'download' && s.live) { $('#spDown').textContent = Math.round(s.live); $('#spDown').parentElement.classList.add('live'); }
+        if (s.up != null) $('#spUp').textContent = Math.round(s.up);
+        else if (s.phase === 'upload' && s.live) { $('#spUp').textContent = Math.round(s.live); $('#spUp').parentElement.classList.add('live'); }
+        if (s.status === 'done') {
+          clearInterval(t);
+          $('#spText').textContent = s.down >= 100 ? 'Connessione veloce: perfetta per giocare e scaricare.' : s.down >= 30 ? 'Connessione buona per giocare online.' : 'Connessione lenta: i download dei giochi richiederanno tempo.';
+          resolve();
+        } else if (s.status === 'error') { clearInterval(t); $('#spText').textContent = s.msg; resolve(); }
+      }, 500);
+    });
+  });
+});
+async function benchDns() {
+  const box = $('#dnsList'); box.innerHTML = '<p class="empty">Provo ogni DNS con i siti più usati…</p>';
+  const list = await api.dns_benchmark(); box.innerHTML = '';
+  list.forEach(p => {
+    const row = h('div', 'dnsrow'), left = h('div'), name = h('b', null, p.name);
+    if (p.best) name.append(h('span', 'tag ok', 'Il più veloce'));
+    left.append(name, h('span', 'meta', p.id === 'current' ? p.desc : `${p.desc} (${p.servers.join(', ')})`));
+    const ms = h('div', 'ms', p.ms == null ? 'non risponde' : p.ms + ' ms');
+    let act = h('span');
+    if (p.id !== 'current' && p.ms != null) {
+      act = h('button', 'btn small' + (p.best ? ' primary' : ''), 'Usa questo');
+      act.onclick = () => busy(act, async () => {
+        if (!await confirmBox(`Usare i DNS di ${p.name}?`, 'Cambio i DNS di tutte le connessioni attive. Puoi tornare indietro dalla Cronologia o con "Torna automatici".', 'Cambia')) return;
+        const r = await api.dns_set(p.id); toast(r.msg, r.ok); netLoaded = false; loadNet();
+      });
+    }
+    row.append(left, ms, act); box.append(row);
+  });
+  const row = h('div', 'dnsrow'), left = h('div');
+  left.append(h('b', null, 'Automatici'), h('span', 'meta', 'Quelli del router o del tuo operatore, come all\'inizio.'));
+  const b = h('button', 'btn small', 'Torna automatici');
+  b.onclick = () => busy(b, async () => { const r = await api.dns_set('auto'); toast(r.msg, r.ok); netLoaded = false; loadNet(); });
+  row.append(left, h('div'), b); box.append(row);
+}
+$('#dnsBtn').addEventListener('click', e => busy(e.currentTarget, benchDns));
+
+// ================= Cronologia =================
+const KIND_ICON = { optimize: 'O', startup: 'A', clean: 'P', disk: 'D', apps: 'I', security: 'S', network: 'R', game: 'G', driver: 'V', update: 'U' };
+const KIND_NAME = { optimize: 'Ottimizzazione', startup: 'Avvio automatico', clean: 'Pulizia', disk: 'Dischi', apps: 'App', security: 'Sicurezza', network: 'Rete', game: 'Modalità partita', driver: 'Driver', update: 'Aggiornamento' };
+async function loadHistory() {
+  const items = await api.history_list();
+  const box = $('#histList'); box.innerHTML = '';
+  if (!items.length) { box.append(h('p', 'empty', 'Nessuna modifica per ora. Qui vedrai tutto quello che PC Booster cambia sul PC.')); return; }
+  let day = null, list = null;
+  const today = new Date().toISOString().slice(0, 10);
+  items.forEach(e => {
+    const d = e.when.slice(0, 10);
+    if (d !== day) {
+      day = d;
+      box.append(h('div', 'hday', d === today ? 'Oggi' : new Date(d).toLocaleDateString('it-IT', { weekday: 'long', day: 'numeric', month: 'long' })));
+      list = h('div', 'hlist'); box.append(list);
+    }
+    const row = h('div', 'hrow' + (e.undone ? ' undone' : ''));
+    const txt = h('div'); txt.append(h('b', null, e.label), h('span', 'meta', [KIND_NAME[e.kind] || '', e.detail].filter(Boolean).join(' · ')));
+    let act = h('span');
+    if (e.undone) act = h('span', 'tag muted', 'Annullata');
+    else if (e.undo) {
+      act = h('button', 'btn small', 'Annulla');
+      act.onclick = () => busy(act, async () => { const r = await api.undo_change(e.id); toast(r.msg, r.ok); loadHistory(); state.startup = null; loadTweaks(); });
+    }
+    row.append(h('div', 'ico', KIND_ICON[e.kind] || '•'), txt, h('time', null, e.when.slice(11)), act);
+    list.append(row);
+  });
+}
+$('#histClear').addEventListener('click', async () => {
+  if (!await confirmBox('Svuotare la cronologia?', 'Le modifiche restano come sono, ma non potrai più annullarle da qui.', 'Svuota', true)) return;
+  const r = await api.history_clear(); toast(r.msg); loadHistory();
+});
+
+// ================= Segnala un problema =================
+$('#reportBtn').addEventListener('click', e => busy(e.currentTarget, async () => { const r = await api.make_report(); toast(r.msg, r.ok); }));
+$('#issueBtn').addEventListener('click', e => busy(e.currentTarget, async () => {
+  const r = await api.make_report();
+  if (r.ok) { await api.open_issue(); toast('Si apre GitHub: descrivi il problema e trascina il file del report che trovi sul desktop.'); }
+  else toast(r.msg, false);
+}));

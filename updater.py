@@ -10,9 +10,13 @@ Come funziona:
 import os
 import sys
 import json
-import tempfile
+import time
+import hashlib
+import threading
 import subprocess
 import urllib.request
+
+import winutil
 
 CREATE_NO_WINDOW = 0x08000000
 DETACHED_PROCESS = 0x00000008
@@ -73,21 +77,38 @@ def _settings_path():
     return os.path.join(folder, "settings.json")
 
 
+_settings_lock = threading.RLock()
+
+
+def _read_settings_file():
+    path = _settings_path()
+    for candidate in (path, path + ".bak"):
+        data = winutil.read_json(candidate)
+        if isinstance(data, dict):
+            return data
+    return {}
+
+
 def load_settings():
     defaults = dict(DEFAULT_SETTINGS)
-    try:
-        with open(_settings_path(), encoding="utf-8") as f:
-            defaults.update(json.load(f))
-    except (OSError, ValueError):
-        pass
+    with _settings_lock:
+        defaults.update(_read_settings_file())
     return defaults
 
 
 def save_settings(data):
-    s = load_settings()
-    s.update(data)
-    with open(_settings_path(), "w", encoding="utf-8") as f:
-        json.dump(s, f, indent=2)
+    """Salva le impostazioni in modo sicuro (anche se due parti dell'app salvano insieme
+    o il PC si spegne a metà, il file non si rovina). Tiene anche una copia .bak."""
+    with _settings_lock:
+        s = load_settings()
+        s.update(data or {})
+        path = _settings_path()
+        text = json.dumps(s, indent=2, ensure_ascii=False)
+        try:
+            winutil.atomic_write(path, text)
+            winutil.atomic_write(path + ".bak", text)
+        except OSError as e:
+            log(f"Impostazioni non salvate: {e}")
     return s
 
 
@@ -109,37 +130,91 @@ def check_for_update():
     except Exception as e:
         return {"ok": False, "available": False, "current": current,
                 "msg": f"Non riesco a contattare GitHub ({e.__class__.__name__}). Controlla la connessione."}
-    latest = rel.get("tag_name", "0.0.0").lstrip("vV")
-    asset = next((a for a in rel.get("assets", []) if a.get("name", "").lower().endswith(".exe")), None)
+    if not isinstance(rel, dict):
+        return {"ok": False, "available": False, "current": current, "msg": "Risposta di GitHub non valida."}
+    latest = str(rel.get("tag_name") or "0.0.0").lstrip("vV")
+    asset = next((a for a in rel.get("assets") or [] if str(a.get("name", "")).lower().endswith(".exe")), None)
+    digest = str((asset or {}).get("digest") or "")
     available = _parse(latest) > _parse(current) and asset is not None
     return {
         "ok": True, "available": available, "current": current, "latest": latest,
         "notes": (rel.get("body") or "").strip()[:600],
         "url": asset.get("browser_download_url") if asset else None,
         "size": asset.get("size") if asset else 0,
+        "sha256": digest[7:].lower() if digest.startswith("sha256:") else "",
         "msg": f"È disponibile la versione {latest}." if available else f"Hai già l'ultima versione ({current}).",
     }
 
 
-def download_update(url: str, expected_size: int = 0):
-    """Scarica il nuovo .exe in una cartella temporanea. Non tocca ancora l'app installata."""
+def _update_dir():
+    """Dove scaricare la versione nuova: accanto all'app (cartella protetta di Program Files,
+    stesso disco: la sostituzione è istantanea); se non si può scrivere lì, nei dati dell'app."""
+    here = os.path.dirname(sys.executable)
+    try:
+        test = os.path.join(here, ".pcb_write_test")
+        with open(test, "w") as f:
+            f.write("1")
+        os.remove(test)
+        return here
+    except OSError:
+        folder = os.path.join(os.path.dirname(_settings_path()), "update")
+        os.makedirs(folder, exist_ok=True)
+        return folder
+
+
+def download_update(url: str, expected_size: int = 0, sha256: str = ""):
+    """Scarica il nuovo .exe e lo controlla. Non tocca ancora l'app installata."""
     if not IS_FROZEN:
         return {"ok": False, "msg": "Stai usando la versione da sorgente: gli aggiornamenti arrivano solo all'exe."}
     if not url or not url.lower().startswith(f"https://github.com/{GITHUB_REPO}/releases/download/".lower()):
         return {"ok": False, "msg": "Indirizzo di download non valido."}
-    tmp_dir = tempfile.mkdtemp(prefix="pcbooster_")
-    new_exe = os.path.join(tmp_dir, "PC Booster.new.exe")
+    folder = _update_dir()
+    new_exe = os.path.join(folder, "PCBooster.exe.new")
+    part = new_exe + ".part"
+    h = hashlib.sha256()
+    size = 0
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "PCBooster-Updater"})
-        with urllib.request.urlopen(req, timeout=120) as r, open(new_exe, "wb") as f:
+        with urllib.request.urlopen(req, timeout=60) as r, open(part, "wb") as f:
+            final = r.geturl().lower()
+            if not final.startswith("https://"):
+                raise IOError(f"indirizzo finale non sicuro: {final}")
             while chunk := r.read(1024 * 256):
                 f.write(chunk)
+                h.update(chunk)
+                size += len(chunk)
     except Exception as e:
+        log(f"Download dell'aggiornamento non riuscito: {e}")
+        _silent_remove(part)
         return {"ok": False, "msg": f"Download non riuscito ({e.__class__.__name__}). Riprova più tardi."}
-    size = os.path.getsize(new_exe)
+    problem = ""
     if size < 1_000_000 or (expected_size and size != expected_size):
-        return {"ok": False, "msg": "Il file scaricato è incompleto. Riprova più tardi."}
+        problem = f"file incompleto ({size} byte invece di {expected_size})"
+    elif sha256 and h.hexdigest() != sha256:
+        problem = "il controllo SHA-256 non corrisponde a quello di GitHub"
+    else:
+        with open(part, "rb") as f:
+            if f.read(2) != b"MZ":
+                problem = "non è un programma Windows"
+    if problem:
+        log(f"Aggiornamento scartato: {problem}")
+        _silent_remove(part)
+        return {"ok": False, "msg": "Il file scaricato non è valido: per sicurezza non l'ho installato. Riprova più tardi."}
+    try:
+        os.replace(part, new_exe)
+    except OSError as e:
+        log(f"Non riesco a preparare l'aggiornamento: {e}")
+        _silent_remove(part)
+        return {"ok": False, "msg": "Non riesco a preparare l'aggiornamento. Riprova più tardi."}
+    log(f"Aggiornamento scaricato e controllato ({size} byte" + (", SHA-256 ok)" if sha256 else ")"))
     return {"ok": True, "path": new_exe, "msg": "Aggiornamento scaricato."}
+
+
+def _silent_remove(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 def log(msg):
@@ -160,26 +235,39 @@ def cleanup_old_versions():
     if not IS_FROZEN:
         return
     import glob
+    import shutil
+    import tempfile
     for old in glob.glob(sys.executable + "*.old"):
         try:
             os.remove(old)
             log(f"Eliminata la versione vecchia {old}")
         except OSError:
             pass
+    # download lasciati a metà o mai installati
+    for folder in {os.path.dirname(sys.executable), os.path.join(os.path.dirname(_settings_path()), "update")}:
+        for leftover in glob.glob(os.path.join(folder, "PCBooster.exe.new*")):
+            _silent_remove(leftover)
+    # cartelle temporanee delle versioni precedenti (fino alla 1.5.0)
+    for d in glob.glob(os.path.join(tempfile.gettempdir(), "pcbooster_*")):
+        if os.path.isdir(d):
+            shutil.rmtree(d, ignore_errors=True)
 
 
 def relaunch():
     """Riapre l'app dopo 3 secondi (così la finestra vecchia ha il tempo di chiudersi)."""
     import launcher
     target = sys.executable
+    sys32 = os.path.dirname(winutil.tool("schtasks"))
+    ping = os.path.join(sys32, "PING.EXE")
     if launcher.task_exists():
-        run = f'schtasks /Run /TN "{launcher.TASK}"'
+        run = f'"{winutil.tool("schtasks")}" /Run /TN "{launcher.TASK}"'
     else:
         run = f'start "" "{target}"'
-    cmd = f"ping -n 4 127.0.0.1 >nul & {run}"
+    cmd = f'"{ping}" -n 4 127.0.0.1 >nul & {run}'
     for flags in (CREATE_NO_WINDOW | DETACHED_PROCESS | 0x01000000, CREATE_NO_WINDOW | DETACHED_PROCESS):
         try:   # 0x01000000 = esci dal "gruppo" dell'app, così Windows non lo chiude insieme a lei
-            subprocess.Popen(["cmd", "/c", cmd], creationflags=flags, close_fds=True)
+            subprocess.Popen([winutil.tool("cmd"), "/c", cmd], creationflags=flags, close_fds=True,
+                             stdin=subprocess.DEVNULL, cwd=sys32)
             log("Riavvio programmato")
             return True
         except OSError as e:
@@ -197,7 +285,6 @@ def apply_update(new_exe: str, restart: bool = True):
     """
     if not IS_FROZEN or not new_exe or not os.path.isfile(new_exe):
         return {"ok": False, "msg": "Nessun aggiornamento pronto."}
-    import time
     import shutil
     target = sys.executable
     old = f"{target}.{int(time.time())}.old"
@@ -208,7 +295,10 @@ def apply_update(new_exe: str, restart: bool = True):
         log(f"Non riesco a rinominare l'app in uso: {e}")
         return {"ok": False, "msg": "Non riesco a sostituire l'app: riprova oppure scarica la versione nuova da GitHub."}
     try:
-        shutil.move(new_exe, target)
+        try:
+            os.replace(new_exe, target)        # stesso disco: istantaneo
+        except OSError:
+            shutil.move(new_exe, target)       # dischi diversi: copia
     except Exception as e:
         log(f"Non riesco a spostare la versione nuova: {e}")
         try:
@@ -216,7 +306,6 @@ def apply_update(new_exe: str, restart: bool = True):
         except OSError as e2:
             log(f"ATTENZIONE, ripristino non riuscito: {e2}")
         return {"ok": False, "msg": "Non riesco a sostituire l'app: riprova oppure scarica la versione nuova da GitHub."}
-    shutil.rmtree(os.path.dirname(new_exe), ignore_errors=True)
     log("Versione nuova installata")
     if restart:
         relaunch()
@@ -224,7 +313,7 @@ def apply_update(new_exe: str, restart: bool = True):
     return {"ok": True, "msg": "Aggiornato: la prossima volta che apri PC Booster avrai la versione nuova."}
 
 
-def install_update(url: str, expected_size: int = 0):
+def install_update(url: str, expected_size: int = 0, sha256: str = ""):
     """Scarica e installa subito (l'app va chiusa dopo questa chiamata)."""
-    r = download_update(url, expected_size)
+    r = download_update(url, expected_size, sha256)
     return apply_update(r["path"], True) if r["ok"] else r

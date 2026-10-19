@@ -13,6 +13,10 @@ App per Windows 10/11 che tiene in forma il PC: driver della scheda video, aggio
 - **Aggiornamenti**: processore, scheda madre, BIOS, Windows Update e aggiornamento di tutti i programmi con winget.
 - **Driver NVIDIA e AMD**: controlla online l'ultima versione, la scarica e apre l'installazione ufficiale.
 - **Avvio automatico** e **App e giochi**.
+- **Installa app**: catalogo di programmi sicuri (browser, launcher di giochi, utilità…) scaricati dalle fonti ufficiali con winget; ne scegli quanti vuoi e li installa da solo.
+- **Rete**: test di velocità, ping verso i server di gioco, prova dei DNS e cambio con un clic.
+- **Cronologia**: tutto quello che l'app cambia, con il tasto Annulla per ottimizzazioni, avvio automatico e DNS.
+- **Segnala un problema**: crea un report sul desktop (nome utente nascosto) e apre la pagina per segnalarlo su GitHub.
 - **Icona vicino all'orologio**: resta attivo chiudendo la finestra, parte con Windows, manda notifiche (driver nuovo, aggiornamenti, spazio da liberare) e dal menu attiva Modalità partita e Pulizia veloce.
 - **Impostazioni**: temi, colori, caratteri, angoli, barra compatta; aggiornamento automatico; pulizia programmata; punto di ripristino.
 
@@ -44,5 +48,9 @@ GitHub crea da solo `PCBooster.exe` ogni volta che pubblichi una nuova release. 
 - `tray.py`: icona vicino all'orologio, notifiche, una sola istanza
 - `installer.py`: installazione in Program Files e riparazione dei collegamenti
 - `security.py`: Microsoft Defender, firewall e salute dei dischi
+- `network.py`: test di velocità, ping e DNS
+- `history.py`: cronologia e Annulla
+- `diagnostics.py`: registro degli errori e report dei problemi
+- `winutil.py`: comandi di Windows (PowerShell, schtasks…) con tempo massimo e salvataggi sicuri
 - `ui/`: interfaccia (HTML, CSS, JavaScript)
 - `.github/workflows/pubblica.yml`: istruzioni per GitHub su come creare l'exe

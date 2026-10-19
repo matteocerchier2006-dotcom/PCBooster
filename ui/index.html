@@ -23,12 +23,15 @@
       <button class="nav" data-view="disk" title="Spazio su disco"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 14h18"/><circle cx="17" cy="17" r=".8"/></svg><span>Dischi</span></button>
       <button class="nav" data-view="gpu" title="Scheda video"><svg viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="9" cy="12" r="3"/><path d="M15 10h4M15 14h4"/></svg><span>Scheda video</span></button>
       <button class="nav" data-view="updates" title="Processore e aggiornamenti"><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/></svg><span>Aggiornamenti</span></button>
+      <button class="nav" data-view="install" title="Installa app"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg><span>Installa app</span></button>
+      <button class="nav" data-view="net" title="Rete"><svg viewBox="0 0 24 24"><path d="M2 8.8a15 15 0 0 1 20 0M5 12.6a10 10 0 0 1 14 0M8.5 16.4a5 5 0 0 1 7 0"/><circle cx="12" cy="20" r="1"/></svg><span>Rete</span></button>
       <button class="nav" data-view="security" title="Sicurezza"><svg viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg><span>Sicurezza</span><i class="badge" id="secDot" hidden></i></button>
       <button class="nav" data-view="startup" title="Avvio automatico"><svg viewBox="0 0 24 24"><path d="M12 3v8"/><path d="M6.3 7.3a8 8 0 1 0 11.4 0"/></svg><span>Avvio automatico</span></button>
       <button class="nav" data-view="apps" title="App e giochi"><svg viewBox="0 0 24 24"><path d="M6 9h4M8 7v4"/><circle cx="15" cy="10" r=".6"/><circle cx="17" cy="12" r=".6"/><path d="M7 5h10a5 5 0 0 1 4.9 6l-1 5a3 3 0 0 1-5.4 1.2L14 15h-4l-1.5 2.2A3 3 0 0 1 3.1 16l-1-5A5 5 0 0 1 7 5z"/></svg><span>App e giochi</span></button>
     </div>
 
     <div class="side-foot">
+      <button class="nav" data-view="history" title="Cronologia"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/></svg><span>Cronologia</span></button>
       <button class="nav" data-view="settings" title="Impostazioni"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg><span>Impostazioni</span><i class="badge" id="updDot" hidden></i></button>
       <div class="admin" id="adminState"></div>
     </div>
@@ -192,6 +195,66 @@
       </div>
     </section>
 
+    <!-- ============ INSTALLA APP ============ -->
+    <section class="view" id="view-install">
+      <header class="top">
+        <div>
+          <h1>Installa app</h1>
+          <p class="sub">Programmi gratuiti e sicuri, scaricati dai siti ufficiali tramite winget, lo strumento di Microsoft. Niente siti falsi, niente pubblicità, niente programmi nascosti.</p>
+        </div>
+        <button class="btn" id="catRefresh">Aggiorna</button>
+      </header>
+      <div id="catalog"><p class="empty">Controllo quali programmi hai già…</p></div>
+      <div class="cleanbar" id="installBar" hidden>
+        <div><span>Selezionate</span><b id="installCount">0</b></div>
+        <button class="btn primary big" id="installBtn">Installa</button>
+      </div>
+    </section>
+
+    <!-- ============ RETE ============ -->
+    <section class="view" id="view-net">
+      <header class="top">
+        <div>
+          <h1>Rete</h1>
+          <p class="sub">Velocità della connessione, ping verso i server di gioco e DNS più veloci.</p>
+        </div>
+      </header>
+      <div class="speed" id="speedBox">
+        <div class="speed-nums">
+          <div><span>Download</span><b id="spDown">–</b><small>Mbps</small></div>
+          <div><span>Upload</span><b id="spUp">–</b><small>Mbps</small></div>
+          <div><span>Ping</span><b id="spPing">–</b><small>ms</small></div>
+        </div>
+        <div class="speed-side"><p id="spText">Misura quanto è veloce la tua connessione. Ci vogliono circa 20 secondi.</p><button class="btn primary big" id="spBtn">Avvia il test</button></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>La tua connessione</h2></div>
+        <div id="netInfo"><p class="empty">Leggo la connessione…</p></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>Ping verso i server</h2><button class="btn small" id="pingBtn">Misura</button></div>
+        <p class="empty" style="margin-bottom:8px">Più è basso, più il gioco online risponde in fretta. Sotto 30 ms è ottimo, sopra 100 ms si sente il ritardo.</p>
+        <div id="pingList"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>DNS</h2><button class="btn small" id="dnsBtn">Prova i DNS</button></div>
+        <p class="empty" style="margin-bottom:8px">Il DNS trasforma i nomi dei siti e dei server in indirizzi. Uno veloce fa collegare prima pagine, launcher e giochi. Puoi tornare indietro quando vuoi.</p>
+        <div id="dnsList"></div>
+      </div>
+    </section>
+
+    <!-- ============ CRONOLOGIA ============ -->
+    <section class="view" id="view-history">
+      <header class="top">
+        <div>
+          <h1>Cronologia</h1>
+          <p class="sub">Tutto quello che PC Booster ha cambiato sul tuo PC. Le modifiche con il pulsante Annulla si possono riportare com'erano.</p>
+        </div>
+        <button class="btn" id="histClear">Svuota</button>
+      </header>
+      <div id="histList"></div>
+    </section>
+
     <!-- ============ SICUREZZA ============ -->
     <section class="view" id="view-security">
       <header class="top">
@@ -311,7 +374,7 @@
           <div><b>Pagina iniziale</b><span>Quella che si apre quando avvii l'app.</span></div>
           <label class="select"><select id="startPick">
             <option value="home">Panoramica</option><option value="game">Modalità partita</option><option value="clean">Pulizia</option><option value="disk">Dischi</option>
-            <option value="gpu">Scheda video</option><option value="updates">Processore e aggiornamenti</option><option value="security">Sicurezza</option>
+            <option value="gpu">Scheda video</option><option value="updates">Processore e aggiornamenti</option><option value="install">Installa app</option><option value="net">Rete</option><option value="security">Sicurezza</option>
             <option value="startup">Avvio automatico</option><option value="apps">App e giochi</option>
           </select></label>
         </div>
@@ -349,6 +412,17 @@
             <button data-v="daily">Ogni giorno</button>
             <button data-v="weekly">Ogni settimana</button>
             <button data-v="monthly">Ogni mese</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>Aiuto e problemi</h2></div>
+        <div class="setting">
+          <div><b>Segnala un problema</b><span>Prepara sul desktop un file con il diario dell'app e le informazioni del PC (senza il tuo nome utente), da allegare alla segnalazione.</span></div>
+          <div class="row-actions">
+            <button class="btn small" id="reportBtn">Prepara il report</button>
+            <button class="btn small primary" id="issueBtn">Segnala su GitHub</button>
           </div>
         </div>
       </div>

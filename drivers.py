@@ -12,11 +12,13 @@ Il download avviene in background; poi si apre l'installazione ufficiale del pro
 import os
 import re
 import json
+import time
 import threading
-import subprocess
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+
+import winutil
 
 IS_WINDOWS = os.name == "nt"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) PCBooster"
@@ -45,21 +47,23 @@ _nv_products = None
 
 def _nvidia_pfid(gpu_name):
     global _nv_products
-    if _nv_products is None:
-        _nv_products = {}
+    if not _nv_products:
+        products = {}
         try:   # elenco ufficiale NVIDIA
             root = ET.fromstring(_get(NV_PRODUCTS))
             for lv in root.iter("LookupValue"):
                 name, value = lv.findtext("Name"), lv.findtext("Value")
                 if name and value:
-                    _nv_products.setdefault(name.strip().lower(), value.strip())
+                    products.setdefault(name.strip().lower(), value.strip())
         except Exception:
             pass
-        if not _nv_products:   # copia dello stesso elenco mantenuta dal progetto nvidia-update
+        if not products:   # copia dello stesso elenco mantenuta dal progetto nvidia-update
             data = json.loads(_get(NV_GPU_DATA).decode("utf-8"))
             for group in data.values():
-                for name, value in group.items():
-                    _nv_products.setdefault(name.strip().lower(), str(value))
+                if isinstance(group, dict):
+                    for name, value in group.items():
+                        products.setdefault(str(name).strip().lower(), str(value))
+        _nv_products = products   # si tiene solo se è andato a buon fine (altrimenti si riprova la prossima volta)
     name = re.sub(r"^nvidia\s+", "", gpu_name.strip(), flags=re.I).lower()
     for candidate in (name, name.replace(" laptop gpu", " laptop"), name + " laptop gpu"):
         if candidate in _nv_products:
@@ -130,50 +134,116 @@ def check_latest(gpu):
 
 
 # ---------------- download e installazione ----------------
+ALLOWED_DOWNLOAD = ("https://us.download.nvidia.com/", "https://international.download.nvidia.com/",
+                    "https://uk.download.nvidia.com/", "https://download.nvidia.com/", "https://drivers.amd.com/")
+SIGNERS = {"nvidia": "NVIDIA Corporation", "amd": "Advanced Micro Devices"}
+
+
+def _host_ok(url):
+    host = urllib.parse.urlsplit(url).hostname or ""
+    return url.lower().startswith("https://") and (host.endswith(".nvidia.com") or host.endswith(".amd.com")
+                                                   or host in ("nvidia.com", "amd.com"))
+
+
+def check_signature(path, vendor):
+    """Controlla la firma digitale del file: deve essere valida e del produttore giusto.
+    Così si avvia solo un'installazione originale NVIDIA o AMD, mai un file cambiato."""
+    if not IS_WINDOWS:
+        return True, ""
+    out = winutil.ps(f"$s=Get-AuthenticodeSignature -LiteralPath '{winutil.q(path)}';"
+                     "\"$($s.Status)|$($s.SignerCertificate.Subject)\"", 120)
+    status, _, subject = out.partition("|")
+    want = SIGNERS.get(vendor, "")
+    if status.strip() != "Valid":
+        return False, f"firma non valida ({status.strip() or 'nessuna'})"
+    if want and want.lower() not in subject.lower():
+        return False, f"firmato da un altro ({subject[:80]})"
+    return True, subject
+
+
 class DriverDownloader:
     def __init__(self):
         self.state = {"status": "idle"}
         self._lock = threading.Lock()
 
     def start(self, url, vendor):
-        ok_hosts = ("https://us.download.nvidia.com/", "https://international.download.nvidia.com/",
-                    "https://drivers.amd.com/")
-        if not url or not url.startswith(ok_hosts):
+        if not url or not url.startswith(ALLOWED_DOWNLOAD) or vendor not in SIGNERS:
             return {"ok": False, "msg": "Indirizzo di download non valido."}
         with self._lock:
-            if self.state.get("status") == "downloading":
+            if self.state.get("status") in ("downloading", "installing"):
                 return {"ok": False, "msg": "Un download è già in corso."}
             self.state = {"status": "downloading", "done": 0, "total": 0, "vendor": vendor}
         threading.Thread(target=self._run, args=(url, vendor), daemon=True).start()
         return {"ok": True}
 
-    def _run(self, url, vendor):
-        folder = os.path.join(os.environ.get("TEMP", "."), "PCBooster", "driver")
+    @staticmethod
+    def _folder():
+        folder = os.path.join(os.environ.get("TEMP") or os.path.expanduser("~"), "PCBooster", "driver")
         os.makedirs(folder, exist_ok=True)
-        path = os.path.join(folder, url.rsplit("/", 1)[-1])
+        # i driver scaricati più di una settimana fa non servono più (sono centinaia di MB)
+        for f in os.listdir(folder):
+            p = os.path.join(folder, f)
+            try:
+                if os.path.isfile(p) and time.time() - os.path.getmtime(p) > 7 * 86400:
+                    os.remove(p)
+            except OSError:
+                pass
+        return folder
+
+    def _run(self, url, vendor):
+        try:
+            self._download_and_launch(url, vendor)
+        except Exception as e:
+            winutil._log(f"Driver {vendor}: {e.__class__.__name__}: {e}")
+            try:   # niente file lasciati a metà
+                folder = self._folder()
+                for f in os.listdir(folder):
+                    if f.endswith(".part"):
+                        os.remove(os.path.join(folder, f))
+            except OSError:
+                pass
+            self.state = {"status": "error", "msg": f"Download non riuscito ({e.__class__.__name__}). "
+                                                    "Riprova o scaricalo dal sito del produttore."}
+
+    def _download_and_launch(self, url, vendor):
+        folder = self._folder()
+        name = re.sub(r"[^\w.\-]", "_", urllib.parse.unquote(url.rsplit("/", 1)[-1].split("?")[0]))[:120]
+        if not name.lower().endswith(".exe"):
+            name += ".exe"
+        path = os.path.join(folder, name)
+        part = path + ".part"
         headers = {"User-Agent": UA}
         if vendor == "amd":
             headers["Referer"] = "https://www.amd.com/"   # AMD lo richiede per i download
-        try:
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=60) as r, open(path, "wb") as f:
-                self.state["total"] = int(r.headers.get("Content-Length") or 0)
-                while chunk := r.read(1024 * 512):
-                    f.write(chunk)
-                    self.state["done"] += len(chunk)
-            if os.path.getsize(path) < 5_000_000:
-                raise IOError("file troppo piccolo")
-        except Exception as e:
-            self.state = {"status": "error", "msg": f"Download non riuscito ({e.__class__.__name__}). "
-                                                    "Riprova o scaricalo dal sito del produttore."}
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=60) as r, open(part, "wb") as f:
+            if not _host_ok(r.geturl()):
+                raise IOError(f"reindirizzato a un sito non ufficiale: {r.geturl()}")
+            total = int(r.headers.get("Content-Length") or 0)
+            self.state["total"] = total
+            while chunk := r.read(1024 * 512):
+                f.write(chunk)
+                self.state["done"] += len(chunk)
+        size = os.path.getsize(part)
+        if size < 5_000_000 or (total and size != total):
+            os.remove(part)
+            raise IOError(f"file incompleto ({size} di {total} byte)")
+        os.replace(part, path)
+        self.state = {"status": "installing", "path": path, "msg": "Controllo la firma del produttore…"}
+        ok, why = check_signature(path, vendor)
+        if not ok:
+            winutil._log(f"Driver {vendor} scartato: {why}")
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            self.state = {"status": "error", "msg": "Il file scaricato non ha la firma originale del produttore: "
+                                                    "per sicurezza non l'ho aperto. Scaricalo dal sito ufficiale."}
             return
-        self.state = {"status": "installing", "path": path}
-        try:
-            if IS_WINDOWS:
-                subprocess.Popen([path], cwd=folder)
-            self.state = {"status": "launched", "msg": "Installazione avviata: segui la finestra del produttore."}
-        except Exception as e:
-            self.state = {"status": "error", "msg": f"Non riesco ad avviare l'installazione ({e})."}
+        if IS_WINDOWS and not winutil.start([path], cwd=folder, hidden=False):
+            self.state = {"status": "error", "msg": "Non riesco ad avviare l'installazione del driver."}
+            return
+        self.state = {"status": "launched", "msg": "Installazione avviata: segui la finestra del produttore."}
 
     def progress(self):
         s = dict(self.state)

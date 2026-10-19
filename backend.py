@@ -9,6 +9,7 @@ import json
 import shutil
 import ctypes
 import datetime
+import re
 import subprocess
 import threading
 
@@ -16,6 +17,10 @@ from cleaner import Cleaner, human_size
 import drivers
 import apptools
 import security
+import history
+import network
+import diagnostics
+import winutil
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -35,27 +40,13 @@ TASK_NAME = "PC Booster - Pulizia automatica"
 # Utilità
 # --------------------------------------------------------------------------
 def run_ps(script: str, timeout: int = 300) -> str:
-    """Esegue uno script PowerShell senza aprire finestre e restituisce l'output."""
-    if not IS_WINDOWS:
-        return ""
-    completed = subprocess.run(
-        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
-         "[Console]::OutputEncoding=[Text.Encoding]::UTF8;" + script],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-        timeout=timeout, creationflags=CREATE_NO_WINDOW,
-    )
-    return completed.stdout.strip()
+    """Esegue uno script PowerShell senza aprire finestre e restituisce l'output ("" se non va)."""
+    return winutil.ps(script, timeout)
 
 
 def run_ps_json(script: str, timeout: int = 300):
-    out = run_ps(script + " | ConvertTo-Json -Depth 4 -Compress", timeout)
-    if not out:
-        return []
-    try:
-        data = json.loads(out)
-    except json.JSONDecodeError:
-        return []
-    return data if isinstance(data, list) else [data]
+    """Come run_ps, ma legge il JSON e restituisce sempre una lista."""
+    return [x for x in winutil.as_list(winutil.ps_json(script, timeout)) if isinstance(x, dict)]
 
 
 def is_admin() -> bool:
@@ -132,6 +123,25 @@ def nvidia_friendly_version(wmi_version: str) -> str:
     return f"{digits[:3]}.{digits[3:]}" if len(digits) == 5 else wmi_version
 
 
+WU_ERRORS = {
+    "0x8024402C": "Windows Update non riesce a collegarsi: controlla la connessione a internet.",
+    "0x80072EE2": "Windows Update non risponde (tempo scaduto): controlla la connessione e riprova.",
+    "0x80072EE7": "Windows Update non riesce a collegarsi: controlla la connessione a internet.",
+    "0x80072EFD": "Windows Update non riesce a collegarsi: controlla la connessione a internet.",
+    "0x80072F8F": "Data o ora del PC sbagliate: sistemale e riprova.",
+    "0x80240438": "Windows Update non riesce a collegarsi: controlla la connessione a internet.",
+    "0x8024A105": "Windows Update è occupato o va riavviato: riavvia il PC e riprova.",
+    "0x80240016": "Windows Update sta già installando qualcosa: aspetta che finisca e riprova.",
+    "0x80070422": "Il servizio Windows Update è disattivato.",
+    "0x80070005": "Permesso negato: servono i permessi di amministratore.",
+}
+
+
+def wu_error_text(code):
+    code = (code or "").upper().replace("0X", "0x")
+    return WU_ERRORS.get(code, f"Windows Update ha dato un errore ({code or 'sconosciuto'}). Riprova tra poco.")
+
+
 DRIVER_PAGES = {
     "nvidia": "https://www.nvidia.com/it-it/drivers/",
     "amd": "https://www.amd.com/it/support/download/drivers.html",
@@ -175,6 +185,8 @@ class Api:
         self._driver_dl = drivers.DriverDownloader()
         self._gpus = None
         self._sec = security.Security()
+        self._speed = network.SpeedTest()
+        self._undo_lock = threading.Lock()
 
     # ================= Panoramica =================
     def get_system_info(self):
@@ -313,13 +325,12 @@ class Api:
         smi = shutil.which("nvidia-smi")
         if not smi:
             return None
-        try:
-            out = subprocess.run([smi, f"--query-gpu={query}", "--format=csv,noheader,nounits"],
-                                 capture_output=True, text=True, timeout=8,
-                                 creationflags=CREATE_NO_WINDOW).stdout.strip().splitlines()
-            return [[c.strip() for c in line.split(",")] for line in out if line.strip()]
-        except Exception:
+        r = winutil.run([smi, f"--query-gpu={query}", "--format=csv,noheader,nounits"], timeout=8,
+                        log_errors=False)
+        if not r.ok:
             return None
+        rows = [[c.strip() for c in line.split(",")] for line in r.out.strip().splitlines() if line.strip()]
+        return rows or None
 
     def get_gpu_info(self):
         self._gpus = self._read_gpus()
@@ -413,7 +424,10 @@ class Api:
                 self._driver_dl.state = {"status": "launched", "msg": "Demo: installazione avviata."}
             threading.Thread(target=fake, daemon=True).start()
             return {"ok": True}
-        return self._driver_dl.start(url, vendor)
+        r = self._driver_dl.start(url, vendor)
+        if r.get("ok"):
+            history.add("driver", f"Download del driver {vendor.upper()} avviato", detail=url.rsplit('/', 1)[-1])
+        return r
 
     def driver_progress(self):
         return self._driver_dl.progress()
@@ -438,16 +452,25 @@ class Api:
         return self._sec.update_signatures()
 
     def security_remove(self):
-        return self._sec.remove_threats()
+        r = self._sec.remove_threats()
+        if r.get("ok"):
+            history.add("security", "Sicurezza: minacce rimosse")
+        return r
 
     def security_offline(self):
         return self._sec.offline_scan()
 
     def security_realtime(self):
-        return self._sec.enable_realtime()
+        r = self._sec.enable_realtime()
+        if r.get("ok"):
+            history.add("security", "Sicurezza: protezione in tempo reale attivata")
+        return r
 
     def security_firewall(self):
-        return self._sec.enable_firewall()
+        r = self._sec.enable_firewall()
+        if r.get("ok"):
+            history.add("security", "Sicurezza: firewall attivato")
+        return r
 
     def open_windows_security(self):
         return self._sec.open_windows_security()
@@ -461,7 +484,108 @@ class Api:
         return apptools.list_app_updates()
 
     def upgrade_app(self, pkg_id):
-        return apptools.upgrade_app(pkg_id)
+        r = apptools.upgrade_app(pkg_id)
+        if r.get("ok"):
+            history.add("apps", f"Aggiornato: {pkg_id}")
+        return r
+
+    # ---------- installa app (catalogo) ----------
+    def app_catalog(self):
+        return apptools.app_catalog()
+
+    def install_app(self, pkg_id, name=""):
+        r = apptools.install_app(pkg_id)
+        if r.get("ok"):
+            history.add("apps", f"Installato: {name or pkg_id}")
+        return r
+
+    # ---------- rete ----------
+    def network_info(self):
+        return network.connection_info()
+
+    def network_ping(self):
+        return network.ping_all()
+
+    def speedtest_start(self):
+        return self._speed.start()
+
+    def speedtest_progress(self):
+        return self._speed.progress()
+
+    def dns_benchmark(self):
+        info = network.connection_info()
+        current = next((a["dns"] for a in info.get("adapters", []) if a.get("dns")), None)
+        return network.benchmark_dns(current)
+
+    def dns_set(self, provider_id):
+        r = network.set_dns(provider_id)
+        if r.get("ok"):
+            name = "automatici" if provider_id == "auto" else next(
+                (p["name"] for p in network.DNS_PROVIDERS if p["id"] == provider_id), provider_id)
+            history.add("network", f"DNS cambiati: {name}", undo=r.get("undo"))
+        return {k: v for k, v in r.items() if k != "undo"}
+
+    # ---------- cronologia ----------
+    def history_list(self):
+        return list(reversed(history.load()))
+
+    def history_clear(self):
+        history.clear()
+        return {"ok": True, "msg": "Cronologia svuotata."}
+
+    def undo_change(self, entry_id):
+        with self._undo_lock:      # due clic veloci su "Annulla" non annullano due volte
+            return self._undo_change(entry_id)
+
+    def _undo_change(self, entry_id):
+        e = history.get(entry_id)
+        if not e or not e.get("undo") or e.get("undone"):
+            return {"ok": False, "msg": "Questa modifica non si può annullare."}
+        u = e["undo"]
+        t = u.get("type")
+        try:
+            if t == "tweak":
+                r = self.set_gpu_tweak(u["name"], u["value"], record=False)
+            elif t == "plan":
+                ok = apptools._set_plan(u["guid"])
+                r = {"ok": ok, "msg": "Piano energetico ripristinato." if ok else "Non riesco a ripristinare il piano energetico."}
+            elif t == "startup":
+                if not IS_WINDOWS:
+                    item = next((x for x in self._startup_cache if x["id"] == u.get("demo_id")), None)
+                    if item:
+                        item["enabled"] = u["enabled"]
+                else:
+                    root = winreg.HKEY_LOCAL_MACHINE if u["root"] == "HKLM" else winreg.HKEY_CURRENT_USER
+                    self._write_startup(root, u["approved"], u["value"], u["enabled"])
+                    self._startup_cache = []
+                r = {"ok": True, "msg": f"{u['name']} " + ("di nuovo all'avvio." if u["enabled"] else "tolto dall'avvio.")}
+            elif t == "dns":
+                r = network.restore_dns(u.get("prev"))
+            else:
+                r = {"ok": False, "msg": "Tipo di modifica sconosciuto."}
+        except PermissionError:
+            r = {"ok": False, "msg": "Permesso negato: servono i permessi di amministratore."}
+        if r.get("ok"):
+            history.mark_undone(entry_id)
+            history.add(e["kind"], f"Annullato: {e['label']}")
+        return r
+
+    # ---------- segnala un problema ----------
+    def make_report(self):
+        try:
+            return diagnostics.make_report(self.get_system_info())
+        except Exception as ex:
+            return {"ok": False, "msg": f"Non riesco a creare il report: {ex}"}
+
+    def open_issue(self):
+        url = diagnostics.issue_url(self.get_system_info())
+        if IS_WINDOWS:
+            os.startfile(url)
+        return {"ok": True, "url": url}
+
+    def log_ui_error(self, text):
+        diagnostics.log_error(f"[interfaccia] {str(text)[:4000]}")
+        return True
 
     def open_winget_store(self):
         return apptools.open_winget_store()
@@ -506,7 +630,22 @@ class Api:
             **self._power_plan(),
         }
 
-    def set_gpu_tweak(self, name, enabled):
+    TWEAK_LABELS = {"game_mode": "Modalità Gioco", "hags": "Pianificazione GPU con accelerazione hardware",
+                    "high_perf": "Prestazioni elevate", "game_dvr": "Registrazione in background"}
+
+    def set_gpu_tweak(self, name, enabled, record=True):
+        undo = None
+        if record and name in self.TWEAK_LABELS:
+            if name == "high_perf":
+                undo = {"type": "plan", "guid": apptools._active_plan()}
+            else:
+                undo = {"type": "tweak", "name": name, "value": bool(self.get_gpu_tweaks().get(name))}
+        r = self._apply_tweak(name, enabled)
+        if r.get("ok") and undo:
+            history.add("optimize", f"{self.TWEAK_LABELS[name]}: {'attivata' if enabled else 'disattivata'}", undo=undo)
+        return r
+
+    def _apply_tweak(self, name, enabled):
         if not IS_WINDOWS:
             return {"ok": True, "msg": "Modalità demo: nessuna modifica fatta."}
         try:
@@ -528,15 +667,8 @@ class Api:
                               "AppCaptureEnabled", 1 if enabled else 0)
                 return {"ok": True, "msg": "Registrazione in background " + ("attivata." if enabled else "disattivata.")}
             if name == "high_perf":
-                guid = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c" if enabled else "381b4222-f694-41f0-9685-ff5bb260df2e"
-                r = subprocess.run(["powercfg", "/setactive", guid], capture_output=True, text=True,
-                                   creationflags=CREATE_NO_WINDOW)
-                if r.returncode != 0 and enabled:
-                    subprocess.run(["powercfg", "-duplicatescheme", guid], capture_output=True,
-                                   creationflags=CREATE_NO_WINDOW)
-                    r = subprocess.run(["powercfg", "/setactive", guid], capture_output=True, text=True,
-                                       creationflags=CREATE_NO_WINDOW)
-                if r.returncode != 0:
+                guid = apptools.HIGH_PERF if enabled else apptools.BALANCED
+                if not apptools._set_plan(guid):
                     return {"ok": False, "msg": "Impossibile cambiare il piano energetico."}
                 return {"ok": True, "msg": "Piano energetico: " + ("Prestazioni elevate." if enabled else "Bilanciato.")}
         except PermissionError:
@@ -546,8 +678,7 @@ class Api:
         return {"ok": False, "msg": "Opzione sconosciuta."}
 
     def _power_plan(self):
-        out = subprocess.run(["powercfg", "/getactivescheme"], capture_output=True, text=True,
-                             errors="replace", creationflags=CREATE_NO_WINDOW).stdout
+        out = winutil.run(["powercfg", "/getactivescheme"], timeout=15).out
         name = out.split("(")[-1].rstrip(") \r\n") if "(" in out else "Sconosciuto"
         return {"power_plan": name, "high_perf": "8c5e7fda" in out or "e9a42b02" in out}
 
@@ -620,13 +751,14 @@ class Api:
         out = run_ps("try { Checkpoint-Computer -Description 'PC Booster' -RestorePointType MODIFY_SETTINGS "
                      "-ErrorAction Stop; 'OK' } catch { $_.Exception.Message }", 300)
         if out.strip().endswith("OK"):
+            history.add("security", "Punto di ripristino creato")
             return {"ok": True, "msg": "Punto di ripristino creato."}
         return {"ok": False, "msg": "Non sono riuscito a creare il punto di ripristino. "
                                     "Controlla che la Protezione sistema sia attiva."}
 
     def open_system_restore(self):
         if IS_WINDOWS:
-            subprocess.Popen(["rstrui.exe"])
+            winutil.start(["rstrui"], hidden=False)
         return True
 
     # ================= Pulizia =================
@@ -634,7 +766,10 @@ class Api:
         return self._cleaner.scan()
 
     def clean_junk(self, ids):
-        return self._cleaner.clean(ids)
+        r = self._cleaner.clean(ids)
+        if r.get("ok"):
+            history.add("clean", f"Pulizia: liberati {r.get('freed')}", detail=f"{len(ids)} voci pulite")
+        return r
 
     def find_large_files(self, min_mb=250):
         return self._cleaner.find_large_files(int(min_mb))
@@ -643,17 +778,19 @@ class Api:
         return self._cleaner.reveal_file(item_id)
 
     def recycle_file(self, item_id):
-        return self._cleaner.recycle_file(item_id)
+        r = self._cleaner.recycle_file(item_id)
+        if r.get("ok"):
+            history.add("disk", r["msg"], detail="Puoi recuperarlo dal Cestino finché non lo svuoti.")
+        return r
 
     # ---------- pulizia automatica (Utilità di pianificazione di Windows) ----------
     def get_auto_clean(self):
         if not IS_WINDOWS:
             return {"freq": getattr(self, "_demo_freq", "off"), "available": True}
-        r = subprocess.run(["schtasks", "/Query", "/TN", TASK_NAME, "/XML"], capture_output=True, text=True,
-                           errors="replace", creationflags=CREATE_NO_WINDOW)
-        if r.returncode != 0:
+        r = winutil.run(["schtasks", "/Query", "/TN", TASK_NAME, "/XML"], timeout=20, log_errors=False)
+        if not r.ok:
             return {"freq": "off", "available": getattr(sys, "frozen", False)}
-        xml = r.stdout
+        xml = r.out
         freq = "daily" if "<ScheduleByDay>" in xml else "monthly" if "<ScheduleByMonth>" in xml else "weekly"
         return {"freq": freq, "available": True}
 
@@ -665,17 +802,15 @@ class Api:
             self._demo_freq = freq
             return {"ok": True, "msg": f"Pulizia automatica {labels[freq]}."}
         if freq == "off":
-            subprocess.run(["schtasks", "/Delete", "/TN", TASK_NAME, "/F"], capture_output=True,
-                           creationflags=CREATE_NO_WINDOW)
+            winutil.run(["schtasks", "/Delete", "/TN", TASK_NAME, "/F"], timeout=20, log_errors=False)
             return {"ok": True, "msg": "Pulizia automatica disattivata."}
         if not getattr(sys, "frozen", False):
             return {"ok": False, "msg": "Disponibile solo nella versione .exe."}
         sched = {"daily": ["/SC", "DAILY"], "weekly": ["/SC", "WEEKLY", "/D", "SUN"],
                  "monthly": ["/SC", "MONTHLY", "/D", "1"]}[freq]
-        r = subprocess.run(["schtasks", "/Create", "/TN", TASK_NAME, "/TR", f'"{sys.executable}" --auto-clean',
-                            *sched, "/ST", "12:00", "/RL", "HIGHEST", "/F"],
-                           capture_output=True, text=True, errors="replace", creationflags=CREATE_NO_WINDOW)
-        if r.returncode != 0:
+        r = winutil.run(["schtasks", "/Create", "/TN", TASK_NAME, "/TR", f'"{sys.executable}" --auto-clean',
+                         *sched, "/ST", "12:00", "/RL", "HIGHEST", "/F"], timeout=30)
+        if not r.ok:
             return {"ok": False, "msg": "Non riesco a programmare la pulizia: servono i permessi di amministratore."}
         return {"ok": True, "msg": f"Pulizia automatica {labels[freq]}, a mezzogiorno."}
 
@@ -694,26 +829,41 @@ class Api:
                 {"title": "2026-10 Aggiornamento cumulativo per Windows 11 (KB5066001)", "type": "Software",
                  "category": "system", "size": "640.0 MB", "id": "c"}]}
         script = r"""
-$s = New-Object -ComObject Microsoft.Update.Session
-$searcher = $s.CreateUpdateSearcher()
-$searcher.Online = $true
-$r = $searcher.Search("IsInstalled=0 and IsHidden=0")
-$list = @()
-foreach ($u in $r.Updates) {
-  $t = if ($u.Type -eq 2) {'Driver'} else {'Software'}
-  $cls = ''
-  try { $cls = $u.DriverClass } catch {}
-  $list += [pscustomobject]@{ title=$u.Title; type=$t; driverClass=$cls; size=[double]$u.MaxDownloadSize; id=$u.Identity.UpdateID }
+try {
+  $s = New-Object -ComObject Microsoft.Update.Session
+  $searcher = $s.CreateUpdateSearcher()
+  $searcher.Online = $true
+  $r = $searcher.Search("IsInstalled=0 and IsHidden=0")
+  $list = @()
+  foreach ($u in $r.Updates) {
+    $t = if ($u.Type -eq 2) {'Driver'} else {'Software'}
+    $cls = ''
+    try { $cls = $u.DriverClass } catch {}
+    $list += [pscustomobject]@{ title=$u.Title; type=$t; driverClass=$cls; size=[double]$u.MaxDownloadSize; id=$u.Identity.UpdateID }
+  }
+  [pscustomobject]@{ ok=$true; list=@($list) }
+} catch {
+  [pscustomobject]@{ ok=$false; code=('0x{0:X8}' -f $_.Exception.HResult); err=$_.Exception.Message }
 }
-$list
 """
-        try:
-            rows = run_ps_json(script, timeout=600)
-        except subprocess.TimeoutExpired:
+        r = winutil.ps_run("& {" + script + "} | ConvertTo-Json -Depth 5 -Compress", timeout=600)
+        if r.timed_out:
             return {"ok": False, "msg": "Windows Update non ha risposto in tempo. Riprova."}
+        try:
+            data = json.loads(r.out) if r.out else None
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            diagnostics.log_error(f"Windows Update: risposta non valida: {r.out[:300]} {r.err[:300]}")
+            return {"ok": False, "msg": "Windows Update non risponde. Riprova tra poco."}
+        if not data.get("ok"):
+            diagnostics.log_error(f"Windows Update: {data.get('code')} {data.get('err')}")
+            return {"ok": False, "msg": wu_error_text(data.get("code"))}
         updates = []
-        for r in rows:
-            title = r.get("title", "")
+        for r in winutil.as_list(data.get("list")):
+            if not isinstance(r, dict):
+                continue
+            title = r.get("title") or ""
             cls = (r.get("driverClass") or "").lower()
             t = title.lower()
             if cls == "display" or " display " in f" {t} ":
@@ -731,30 +881,54 @@ $list
             return {"ok": True, "msg": "Modalità demo: niente installato.", "reboot": False}
         if not is_admin():
             return {"ok": False, "msg": "Servono i permessi di amministratore."}
-        id_list = ",".join(f"'{i}'" for i in ids if all(c.isalnum() or c == '-' for c in str(i)))
-        if not id_list:
+        ids = [str(i) for i in (ids or []) if re.fullmatch(r"[0-9A-Za-z\-]{1,64}", str(i))]
+        if not ids:
             return {"ok": False, "msg": "Nessun aggiornamento selezionato."}
+        id_list = ",".join(f"'{i}'" for i in ids)
         script = rf"""
-$want = @({id_list})
-$s = New-Object -ComObject Microsoft.Update.Session
-$r = $s.CreateUpdateSearcher().Search("IsInstalled=0 and IsHidden=0")
-$col = New-Object -ComObject Microsoft.Update.UpdateColl
-foreach ($u in $r.Updates) {{ if ($want -contains $u.Identity.UpdateID) {{ if (-not $u.EulaAccepted) {{ $u.AcceptEula() }}; [void]$col.Add($u) }} }}
-if ($col.Count -eq 0) {{ [pscustomobject]@{{n=0; code=0; reboot=$false}}; return }}
-$d = $s.CreateUpdateDownloader(); $d.Updates = $col; [void]$d.Download()
-$i = $s.CreateUpdateInstaller(); $i.Updates = $col; $res = $i.Install()
-[pscustomobject]@{{n=$col.Count; code=$res.ResultCode; reboot=$res.RebootRequired}}
+try {{
+  $want = @({id_list})
+  $s = New-Object -ComObject Microsoft.Update.Session
+  $r = $s.CreateUpdateSearcher().Search("IsInstalled=0 and IsHidden=0")
+  $col = New-Object -ComObject Microsoft.Update.UpdateColl
+  foreach ($u in $r.Updates) {{ if ($want -contains $u.Identity.UpdateID) {{ if (-not $u.EulaAccepted) {{ $u.AcceptEula() }}; [void]$col.Add($u) }} }}
+  if ($col.Count -eq 0) {{ [pscustomobject]@{{ok=$true; n=0; code=2; reboot=$false}}; return }}
+  $d = $s.CreateUpdateDownloader(); $d.Updates = $col; [void]$d.Download()
+  $i = $s.CreateUpdateInstaller(); $i.Updates = $col; $res = $i.Install()
+  $okn = 0; for ($k = 0; $k -lt $col.Count; $k++) {{ if ($res.GetUpdateResult($k).ResultCode -eq 2) {{ $okn++ }} }}
+  [pscustomobject]@{{ok=$true; n=$col.Count; okn=$okn; code=$res.ResultCode; reboot=$res.RebootRequired}}
+}} catch {{
+  [pscustomobject]@{{ ok=$false; code=('0x{{0:X8}}' -f $_.Exception.HResult); err=$_.Exception.Message }}
+}}
 """
-        try:
-            rows = run_ps_json(script, timeout=3600)
-        except subprocess.TimeoutExpired:
+        r = winutil.ps_run("& {" + script + "} | ConvertTo-Json -Depth 4 -Compress", timeout=3600)
+        if r.timed_out:
             return {"ok": False, "msg": "L'installazione sta impiegando troppo. Controlla Windows Update."}
-        r = rows[0] if rows else {}
-        ok = r.get("code") in (2, 3)
-        msg = f"Installati {r.get('n', 0)} aggiornamenti." if ok else "Installazione non riuscita."
-        if r.get("reboot"):
+        try:
+            d = json.loads(r.out) if r.out else {}
+        except ValueError:
+            d = {}
+        if not isinstance(d, dict) or not d:
+            diagnostics.log_error(f"Installazione aggiornamenti: risposta non valida: {r.out[:300]} {r.err[:300]}")
+            return {"ok": False, "msg": "Installazione non riuscita: riprova da Impostazioni → Windows Update."}
+        if not d.get("ok"):
+            diagnostics.log_error(f"Installazione aggiornamenti: {d.get('code')} {d.get('err')}")
+            return {"ok": False, "msg": wu_error_text(d.get("code"))}
+        n, okn = d.get("n", 0), d.get("okn", d.get("n", 0))
+        ok = d.get("code") in (2, 3) and okn > 0 or n == 0
+        if n == 0:
+            msg = "Questi aggiornamenti sono già stati installati."
+        elif okn == n:
+            msg = f"Installati {n} aggiornamenti."
+        elif okn:
+            msg = f"Installati {okn} aggiornamenti su {n}: gli altri riprova più tardi."
+        else:
+            msg = "Installazione non riuscita: riprova da Impostazioni → Windows Update."
+        if d.get("reboot"):
             msg += " Riavvia il PC per completare."
-        return {"ok": ok, "msg": msg, "reboot": bool(r.get("reboot"))}
+        if okn:
+            history.add("update", f"Windows Update: {okn} aggiornamenti installati")
+        return {"ok": bool(ok), "msg": msg, "reboot": bool(d.get("reboot"))}
 
     def get_cpu_info(self):
         if not IS_WINDOWS:
@@ -864,22 +1038,30 @@ $i = $s.CreateUpdateInstaller(); $i.Updates = $col; $res = $i.Install()
             return {"ok": False, "msg": "Elemento non trovato, aggiorna l'elenco."}
         if not IS_WINDOWS:
             item["enabled"] = enabled
+            history.add("startup", f"{item['name']}: {'riattivato' if enabled else 'tolto'} dall'avvio automatico",
+                        undo={"type": "startup", "name": item["name"], "demo_id": item["id"], "enabled": not enabled})
             return {"ok": True, "msg": f"{item['name']} " + ("riattivato." if enabled else "non partirà più all'avvio.")}
         if item["_aroot"] == winreg.HKEY_LOCAL_MACHINE and not is_admin():
             return {"ok": False, "msg": "Per questo programma servono i permessi di amministratore."}
+        try:
+            self._write_startup(item["_aroot"], item["_approved"], item["_value"], enabled)
+        except PermissionError:
+            return {"ok": False, "msg": "Permesso negato: avvia l'app come amministratore."}
+        item["enabled"] = enabled
+        history.add("startup", f"{item['name']}: {'riattivato' if enabled else 'tolto'} dall'avvio automatico",
+                    undo={"type": "startup", "name": item["name"], "value": item["_value"], "approved": item["_approved"],
+                          "root": "HKLM" if item["_aroot"] == winreg.HKEY_LOCAL_MACHINE else "HKCU",
+                          "enabled": not enabled})
+        return {"ok": True, "msg": f"{item['name']} " + ("riattivato." if enabled else "non partirà più all'avvio.")}
+
+    def _write_startup(self, root, approved, value, enabled):
         if enabled:
             data = b"\x02" + b"\x00" * 11
         else:
             filetime = int((datetime.datetime.utcnow() - datetime.datetime(1601, 1, 1)).total_seconds() * 10 ** 7)
             data = b"\x03\x00\x00\x00" + filetime.to_bytes(8, "little")
-        try:
-            with winreg.CreateKeyEx(item["_aroot"], rf"{self._APPROVED}\{item['_approved']}", 0,
-                                    winreg.KEY_SET_VALUE) as k:
-                winreg.SetValueEx(k, item["_value"], 0, winreg.REG_BINARY, data)
-        except PermissionError:
-            return {"ok": False, "msg": "Permesso negato: avvia l'app come amministratore."}
-        item["enabled"] = enabled
-        return {"ok": True, "msg": f"{item['name']} " + ("riattivato." if enabled else "non partirà più all'avvio.")}
+        with winreg.CreateKeyEx(root, rf"{self._APPROVED}\{approved}", 0, winreg.KEY_SET_VALUE) as k:
+            winreg.SetValueEx(k, value, 0, winreg.REG_BINARY, data)
 
     def disable_suggested_startup(self):
         if not self._startup_cache:
@@ -963,14 +1145,25 @@ $i = $s.CreateUpdateInstaller(); $i.Updates = $col; $res = $i.Install()
             return {"ok": False, "msg": "App non trovata, aggiorna l'elenco."}
         if not IS_WINDOWS:
             return {"ok": True, "msg": f"Demo: avrei avviato la disinstallazione di {app['name']}."}
-        cmd = app["_uninstall"]
-        try:
-            if "msiexec" in cmd.lower():
-                cmd = cmd.replace("/I", "/X").replace("/i", "/X")
-            subprocess.Popen(cmd, shell=True)
-            return {"ok": True, "msg": f"Disinstallazione di {app['name']} avviata: segui la finestra che si è aperta."}
-        except Exception as e:
-            return {"ok": False, "msg": f"Impossibile avviare la disinstallazione: {e}"}
+        cmd = (app["_uninstall"] or "").strip()
+        if not cmd:
+            return {"ok": False, "msg": "Questo programma non dice come disinstallarlo: usa Impostazioni → App."}
+        m = re.search(r"\{[0-9A-Fa-f\-]{36}\}", cmd)
+        if "msiexec" in cmd.lower() and m:
+            # Programmi MSI: si usa sempre "disinstalla" (/X) con il codice del prodotto
+            args = [os.path.join(winutil._SYS32, "msiexec.exe"), "/X", m.group(0)]
+            started = winutil.start(args, hidden=False)
+        else:
+            try:
+                subprocess.Popen(cmd, shell=True, stdin=subprocess.DEVNULL)
+                started = True
+            except OSError as e:
+                diagnostics.log_error(f"Disinstallazione di {app['name']} non avviata: {e}")
+                started = False
+        if not started:
+            return {"ok": False, "msg": "Impossibile avviare la disinstallazione: prova da Impostazioni → App."}
+        history.add("apps", f"Disinstallazione avviata: {app['name']}")
+        return {"ok": True, "msg": f"Disinstallazione di {app['name']} avviata: segui la finestra che si è aperta."}
 
     def open_windows_settings(self, page):
         allowed = {"apps": "ms-settings:appsfeatures", "update": "ms-settings:windowsupdate",
@@ -982,3 +1175,68 @@ $i = $s.CreateUpdateInstaller(); $i.Updates = $col; $res = $i.Install()
 
     def restart_as_admin(self):
         return relaunch_as_admin()
+
+
+# --------------------------------------------------------------------------
+# Rete di sicurezza: un errore in Python non deve mai bloccare l'interfaccia
+# --------------------------------------------------------------------------
+# Cosa restituire se una funzione va in errore (l'interfaccia si aspetta questi formati)
+_LIST_RESULTS = {"get_drives", "get_gpu_info", "list_startup", "list_apps", "history_list", "running_apps",
+                 "find_large_files", "security_threats", "disk_health", "network_ping"}
+_BOOL_RESULTS = {"open_url", "open_system_restore", "open_windows_settings", "restart_as_admin", "log_ui_error",
+                 "open_winget_store", "open_windows_security"}
+_FALLBACKS = {
+    "get_prefs": lambda: __import__("updater").load_settings(),
+    "set_prefs": lambda: __import__("updater").load_settings(),
+    "reset_prefs": lambda: __import__("updater").load_settings(),
+    "get_live_stats": lambda: {"cpu_load": 0, "ram_used": 0, "ram_used_gb": 0, "disk_free_gb": 0, "disk_total_gb": 0},
+    "scan_junk": lambda: {"categories": [], "items": [], "ok": False},
+    "get_gpu_tweaks": lambda: {},
+    "get_cpu_info": lambda: {"name": "?"},
+    "get_game_mode": lambda: {"state": None, "opts": {}, "apps": []},
+    "get_auto_clean": lambda: {"freq": "off", "available": False},
+    "network_info": lambda: {"ok": False, "adapters": []},
+    "dns_benchmark": lambda: [],
+    "speedtest_progress": lambda: {"status": "error", "msg": "Test non riuscito."},
+    "driver_progress": lambda: {"status": "error", "msg": "Download non riuscito."},
+    "security_progress": lambda: {"status": "idle"},
+}
+_ERROR_MSG = ("Qualcosa è andato storto. Se succede ancora usa Impostazioni → Aiuto e problemi → "
+              "Crea report, così si vede il motivo.")
+
+
+def _guarded(name, fn):
+    import functools
+    import traceback
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception:
+            diagnostics.log_error(f"[{name}]\n{traceback.format_exc()}")
+            if name in _LIST_RESULTS:
+                return []
+            if name in _BOOL_RESULTS:
+                return False
+            if name in _FALLBACKS:
+                try:
+                    return _FALLBACKS[name]()
+                except Exception:
+                    pass
+            return {"ok": False, "msg": _ERROR_MSG}
+    wrapper._pcb_guarded = True
+    return wrapper
+
+
+def harden_api(cls):
+    """Avvolge ogni funzione pubblica della classe con la rete di sicurezza."""
+    import inspect
+    for name, value in list(vars(cls).items()):
+        if name.startswith("_") or not inspect.isfunction(value) or getattr(value, "_pcb_guarded", False):
+            continue
+        setattr(cls, name, _guarded(name, value))
+    return cls
+
+
+harden_api(Api)

@@ -11,12 +11,11 @@ import sys
 import time
 import socket
 import threading
-import subprocess
 
 import updater
+import winutil
 
 IS_WINDOWS = sys.platform == "win32"
-CREATE_NO_WINDOW = 0x08000000
 
 
 def _data_dir():
@@ -45,8 +44,10 @@ def start_instance_server(on_show):
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.bind(("127.0.0.1", 0))
     srv.listen(2)
-    with open(_port_file(), "w", encoding="utf-8") as f:
-        f.write(str(srv.getsockname()[1]))
+    try:
+        winutil.atomic_write(_port_file(), str(srv.getsockname()[1]))
+    except OSError as e:
+        updater.log(f"File dell'istanza non scritto: {e}")
 
     def loop():
         while True:
@@ -71,8 +72,7 @@ def set_start_with_windows(enabled):
     if not IS_WINDOWS:
         return {"ok": True, "msg": "Demo: avvio con Windows " + ("attivato." if enabled else "disattivato.")}
     if not enabled:
-        subprocess.run(["schtasks", "/Delete", "/TN", LOGON_TASK, "/F"], capture_output=True,
-                       creationflags=CREATE_NO_WINDOW)
+        winutil.run(["schtasks", "/Delete", "/TN", LOGON_TASK, "/F"], timeout=20, log_errors=False)
         return {"ok": True, "msg": "PC Booster non partirà più con Windows."}
     if not getattr(sys, "frozen", False):
         return {"ok": False, "msg": "Disponibile solo nella versione .exe."}
@@ -86,9 +86,7 @@ def set_start_with_windows(enabled):
         "-ExecutionTimeLimit ([TimeSpan]::Zero);"
         f"Register-ScheduledTask -TaskName '{LOGON_TASK}' -Action $a -Trigger $t -Principal $p -Settings $s -Force | Out-Null; 'OK'"
     )
-    r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
-                       capture_output=True, text=True, errors="replace", creationflags=CREATE_NO_WINDOW)
-    if (r.stdout or "").strip().endswith("OK"):
+    if winutil.ps(script, 90).endswith("OK"):
         return {"ok": True, "msg": "PC Booster partirà con Windows, già vicino all'orologio."}
     return {"ok": False, "msg": "Non sono riuscito ad attivarlo: servono i permessi di amministratore."}
 
@@ -96,10 +94,7 @@ def set_start_with_windows(enabled):
 def refresh_icons():
     """Fa vedere a Windows la nuova icona (sul desktop e nella barra) dopo un aggiornamento."""
     if IS_WINDOWS:
-        try:
-            subprocess.Popen(["ie4uinit.exe", "-show"], creationflags=CREATE_NO_WINDOW)
-        except OSError:
-            pass
+        winutil.start(["ie4uinit", "-show"])
 
 
 # ======================================================================
@@ -249,8 +244,7 @@ class Tray:
             if u.get("status") == "ready":
                 found = True
                 if not self.window_visible() and not s.get("game_mode_state"):
-                    with open(os.path.join(_data_dir(), "start_hidden"), "w") as f:
-                        f.write("1")
+                    winutil.atomic_write(os.path.join(_data_dir(), "start_hidden"), "1")
                     r = self.api.apply_update_now()
                     if r.get("ok"):
                         return

@@ -7,6 +7,7 @@ Avvii speciali:
   --no-admin     non chiede i permessi di amministratore
 """
 import os
+import re
 import sys
 import threading
 
@@ -15,7 +16,9 @@ import launcher
 import apptools
 import tray
 import installer
-from backend import Api, is_admin, relaunch_as_admin, IS_WINDOWS
+import history
+import diagnostics
+from backend import Api, is_admin, relaunch_as_admin, harden_api, IS_WINDOWS
 
 ALLOWED_PREFS = set(updater.DEFAULT_SETTINGS) - {"game_mode_state", "game_mode_opts", "game_mode_close", "last_version",
                                                   "notified", "tray_tip_seen", "start_with_windows"}
@@ -44,7 +47,19 @@ class AppApi(Api):
         return updater.load_settings()
 
     def set_prefs(self, data):
-        clean = {k: v for k, v in (data or {}).items() if k in ALLOWED_PREFS}
+        """Salva solo preferenze conosciute e del tipo giusto (l'interfaccia non può scrivere altro)."""
+        clean = {}
+        for k, v in (data or {}).items() if isinstance(data, dict) else []:
+            if k not in ALLOWED_PREFS:
+                continue
+            default = updater.DEFAULT_SETTINGS.get(k)
+            if isinstance(default, bool):
+                if isinstance(v, bool):
+                    clean[k] = v
+            elif isinstance(default, str):
+                if isinstance(v, str) and len(v) <= 40 and re.fullmatch(r"[\w#\-. ]*", v):
+                    if k != "accent" or re.fullmatch(r"#[0-9a-fA-F]{6}", v):
+                        clean[k] = v
         return updater.save_settings(clean)
 
     def reset_prefs(self):
@@ -77,7 +92,7 @@ class AppApi(Api):
             self._update = {"status": "source", "latest": r["latest"], "notes": r.get("notes", ""),
                             "msg": f"C'è la versione {r['latest']}: scaricala da GitHub."}
         else:
-            d = updater.download_update(r["url"], r.get("size", 0))
+            d = updater.download_update(r["url"], r.get("size", 0), r.get("sha256", ""))
             if d["ok"]:
                 self._update = {"status": "ready", "latest": r["latest"], "notes": r.get("notes", ""),
                                 "path": d["path"], "msg": f"Versione {r['latest']} pronta."}
@@ -98,7 +113,10 @@ class AppApi(Api):
     def on_close(self):
         """Alla chiusura: se un aggiornamento è pronto, lo installa (la prossima apertura è già aggiornata)."""
         if self._update.get("status") == "ready" and updater.load_settings().get("auto_update", True):
-            updater.apply_update(self._update["path"], restart=False)
+            try:
+                updater.apply_update(self._update["path"], restart=False)
+            except Exception as e:
+                diagnostics.log_error(f"Aggiornamento alla chiusura non riuscito: {e}")
             self._update["status"] = "applied"
 
     # ---------- modalità partita ----------
@@ -117,6 +135,7 @@ class AppApi(Api):
         names = [n for n in (close_names or []) if isinstance(n, str)]
         state = apptools.start_game_mode(opts, names)
         updater.save_settings({"game_mode_state": state, "game_mode_opts": opts, "game_mode_close": names})
+        history.add("game", "Modalità partita avviata", detail=state.get("msg", ""))
         return state
 
     def stop_game_mode(self):
@@ -124,6 +143,7 @@ class AppApi(Api):
         state = s.get("game_mode_state") or {}
         r = apptools.stop_game_mode(state, (s.get("game_mode_opts") or {}).get("reopen", True))
         updater.save_settings({"game_mode_state": None})
+        history.add("game", "Modalità partita terminata", detail=r.get("msg", ""))
         return r
 
     # ---------- icona vicino all'orologio ----------
@@ -163,7 +183,11 @@ class AppApi(Api):
         return False
 
 
+harden_api(AppApi)
+
+
 def main():
+    diagnostics.install_hooks()
     # Pulizia programmata: nessuna finestra, pulisce e chiude
     if "--auto-clean" in sys.argv:
         Api().auto_clean()

@@ -10,7 +10,9 @@ import sys
 import time
 import ctypes
 import shutil
-import subprocess
+import threading
+
+import winutil
 
 IS_WINDOWS = sys.platform == "win32"
 CREATE_NO_WINDOW = 0x08000000
@@ -32,11 +34,60 @@ def _winget():
     return p if os.path.exists(p) else None
 
 
-def _decode(raw: bytes) -> str:
-    try:
-        return raw.decode("utf-8")
-    except UnicodeDecodeError:
-        return raw.decode("oem" if IS_WINDOWS else "latin-1", errors="replace")
+_decode = winutil.decode
+
+# Una sola installazione/aggiornamento alla volta: winget non ne regge due insieme
+_install_lock = threading.Lock()
+
+# Codici di uscita di winget (https://github.com/microsoft/winget-cli/blob/master/doc/windows/package-manager/winget/returnCodes.md)
+WG_NO_PACKAGES = 0x8A150014
+WG_NO_UPDATE = 0x8A15002B
+WG_ALREADY = (0x8A150061, 0x8A15010D)
+WG_MESSAGES = {
+    0x8A150008: "Download non riuscito: controlla la connessione e riprova.",
+    0x8A150011: "Il file scaricato non corrisponde a quello ufficiale: per sicurezza non l'ho installato. Riprova più tardi.",
+    0x8A150101: "Il programma è aperto: chiudilo e riprova.",
+    0x8A150102: "C'è già un'altra installazione in corso: aspetta che finisca e riprova.",
+    0x8A150103: "Alcuni file sono in uso: chiudi il programma e riprova.",
+    0x8A150104: "Manca un componente di Windows che serve a questo programma.",
+    0x8A150105: "Spazio su disco finito: libera spazio da Pulizia e riprova.",
+    0x8A150106: "Memoria insufficiente: chiudi qualche programma e riprova.",
+    0x8A150107: "Serve la connessione a internet.",
+    0x8A150108: "L'installazione del produttore ha dato un errore: prova a scaricarlo dal sito ufficiale.",
+    0x8A150109: "Fatto: riavvia il PC per finire.",
+    0x8A15010A: "Prima di installarlo devi riavviare il PC.",
+    0x8A15010B: "Il PC si sta riavviando per finire l'installazione.",
+    0x8A15010C: "Installazione annullata.",
+    0x8A15010E: "Hai già una versione più nuova.",
+    0x8A15010F: "Installazione bloccata dalle regole del PC.",
+    0x8A150110: "Non riesco a installare i componenti che servono a questo programma.",
+    0x8A150111: "Il programma è usato da un'altra app: chiudila e riprova.",
+}
+
+
+def _rc(code):
+    """Il codice di uscita come numero senza segno (Windows lo restituisce a volte negativo)."""
+    return (code or 0) & 0xFFFFFFFF
+
+
+def _winget_result(r, done_msg):
+    """Trasforma il risultato di winget in {ok, msg} con un messaggio chiaro."""
+    if r.timed_out:
+        return {"ok": False, "msg": "Ci sta mettendo troppo: riprova più tardi."}
+    code = _rc(r.rc)
+    if code == 0:
+        return {"ok": True, "msg": done_msg}
+    if code in WG_ALREADY or code == WG_NO_UPDATE:
+        return {"ok": True, "msg": "Era già installato." if code in WG_ALREADY else "È già all'ultima versione."}
+    if code == 0x8A150109:
+        return {"ok": True, "msg": WG_MESSAGES[code], "reboot": True}
+    if code in WG_MESSAGES:
+        return {"ok": False, "msg": WG_MESSAGES[code]}
+    out = (r.out + r.err).lower()
+    if "in use" in out or "in uso" in out or "running" in out:
+        return {"ok": False, "msg": "Non riuscito: chiudi il programma e riprova."}
+    winutil._log(f"winget: codice 0x{code:08X}\n{r.out[-1500:]}")
+    return {"ok": False, "msg": f"Non riuscito (codice 0x{code:08X}): riprova o scaricalo dal sito ufficiale."}
 
 
 def parse_winget_table(text: str):
@@ -89,13 +140,16 @@ def list_app_updates():
     if not exe:
         return {"ok": False, "missing": True,
                 "msg": "Manca \"Programma di installazione app\" di Microsoft: installalo dal Microsoft Store."}
-    try:
-        r = subprocess.run([exe, "upgrade", "--accept-source-agreements", "--disable-interactivity"],
-                           capture_output=True, timeout=180, creationflags=CREATE_NO_WINDOW,
-                           env={**os.environ, "NO_COLOR": "1"})
-    except subprocess.TimeoutExpired:
+    r = winutil.run([exe, "upgrade", "--accept-source-agreements", "--disable-interactivity"],
+                    timeout=180, env={**os.environ, "NO_COLOR": "1"})
+    if r.timed_out:
         return {"ok": False, "msg": "winget non ha risposto in tempo. Riprova."}
-    apps = [a for a in parse_winget_table(_decode(r.stdout)) if "pcbooster" not in a["id"].lower()]
+    apps = [a for a in parse_winget_table(r.out) if "pcbooster" not in a["id"].lower()]
+    code = _rc(r.rc)
+    if not apps and code not in (0, WG_NO_PACKAGES, WG_NO_UPDATE):
+        winutil._log(f"winget upgrade: codice 0x{code:08X}\n{r.out[-1500:]}\n{r.err[-500:]}")
+        msg = WG_MESSAGES.get(code) or f"winget non è riuscito a controllare (codice 0x{code:08X}). Riprova tra poco."
+        return {"ok": False, "msg": msg}
     return {"ok": True, "apps": apps}
 
 
@@ -109,18 +163,10 @@ def upgrade_app(pkg_id: str):
     exe = _winget()
     if not exe:
         return {"ok": False, "msg": "winget non trovato."}
-    try:
-        r = subprocess.run([exe, "upgrade", "--id", pkg_id, "--exact", "--silent", "--accept-package-agreements",
-                            "--accept-source-agreements", "--disable-interactivity"],
-                           capture_output=True, timeout=1800, creationflags=CREATE_NO_WINDOW)
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "msg": "Ci sta mettendo troppo: riprova più tardi."}
-    if r.returncode == 0:
-        return {"ok": True, "msg": "Aggiornato."}
-    out = _decode(r.stdout).lower()
-    if "in use" in out or "in uso" in out or "running" in out:
-        return {"ok": False, "msg": "Non riuscito: chiudi il programma e riprova."}
-    return {"ok": False, "msg": "Non riuscito: prova ad aggiornarlo dal programma stesso."}
+    with _install_lock:
+        r = winutil.run([exe, "upgrade", "--id", pkg_id, "--exact", "--silent", "--accept-package-agreements",
+                         "--accept-source-agreements", "--disable-interactivity"], timeout=1800)
+    return _winget_result(r, "Aggiornato.")
 
 
 def open_winget_store():
@@ -210,7 +256,7 @@ def _close(names):
         except psutil.Error:
             pass
     for n in names:
-        subprocess.run(["taskkill", "/IM", n], capture_output=True, creationflags=CREATE_NO_WINDOW)
+        winutil.run(["taskkill", "/IM", n], timeout=15, log_errors=False)
     time.sleep(3)
     for p in psutil.process_iter(["name"]):
         try:
@@ -242,25 +288,28 @@ def trim_memory():
 
 
 HIGH_PERF = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
+BALANCED = "381b4222-f694-41f0-9685-ff5bb260df2e"
+_GUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 
 
 def _active_plan():
     if not IS_WINDOWS:
         return "381b4222-f694-41f0-9685-ff5bb260df2e"
-    out = subprocess.run(["powercfg", "/getactivescheme"], capture_output=True, text=True, errors="replace",
-                         creationflags=CREATE_NO_WINDOW).stdout
-    m = re.search(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", out, re.I)
-    return m.group(0) if m else ""
+    m = _GUID.search(winutil.run(["powercfg", "/getactivescheme"], timeout=15).out)
+    return m.group(0).lower() if m else ""
 
 
 def _set_plan(guid):
     if not IS_WINDOWS or not guid:
         return True
-    r = subprocess.run(["powercfg", "/setactive", guid], capture_output=True, creationflags=CREATE_NO_WINDOW)
-    if r.returncode != 0 and guid == HIGH_PERF:
-        subprocess.run(["powercfg", "-duplicatescheme", guid], capture_output=True, creationflags=CREATE_NO_WINDOW)
-        r = subprocess.run(["powercfg", "/setactive", guid], capture_output=True, creationflags=CREATE_NO_WINDOW)
-    return r.returncode == 0
+    if not _GUID.fullmatch(str(guid)):
+        return False
+    r = winutil.run(["powercfg", "/setactive", guid], timeout=20)
+    if not r.ok and guid.lower() == HIGH_PERF:
+        # su alcuni PC (es. portatili moderni) il piano "Prestazioni elevate" va prima ricreato
+        winutil.run(["powercfg", "-duplicatescheme", guid], timeout=20)
+        r = winutil.run(["powercfg", "/setactive", guid], timeout=20)
+    return r.ok and _active_plan() == guid.lower()
 
 
 def human(b):
@@ -297,13 +346,140 @@ def stop_game_mode(state, reopen=True):
         n = 0
         for c in state.get("closed", []):
             if c.get("path") and os.path.exists(c["path"]):
-                try:
-                    subprocess.Popen([c["path"]], cwd=os.path.dirname(c["path"]))
+                if winutil.start([c["path"]], cwd=os.path.dirname(c["path"]), hidden=False):
                     n += 1
-                except OSError:
-                    pass
         if n:
             parts.append(f"{n} app riaperte")
     elif reopen and state.get("closed"):
         parts.append(f"{len(state['closed'])} app riaperte")
     return {"ok": True, "msg": "Modalità partita terminata" + (": " + ", ".join(parts) if parts else "") + "."}
+
+
+# ======================================================================
+# Installa app: catalogo di programmi sicuri (installati da winget, dai siti ufficiali)
+# ======================================================================
+CATALOG = [
+    ("Browser", [
+        ("Brave.Brave", "Brave", "Veloce, blocca pubblicità e tracciamento."),
+        ("Mozilla.Firefox.it", "Firefox", "Il browser indipendente, in italiano."),
+        ("Zen-Team.Zen-Browser", "Zen Browser", "Bello e minimal, basato su Firefox."),
+        ("Google.Chrome", "Google Chrome", "Il più usato al mondo."),
+        ("Vivaldi.Vivaldi", "Vivaldi", "Personalizzabile in tutto."),
+        ("Opera.OperaGX", "Opera GX", "Il browser pensato per i gamer."),
+    ]),
+    ("Giochi", [
+        ("Valve.Steam", "Steam", "Il negozio di giochi più grande per PC."),
+        ("EpicGames.EpicGamesLauncher", "Epic Games", "Fortnite e giochi gratis ogni settimana."),
+        ("GOG.Galaxy", "GOG Galaxy", "Giochi senza protezioni e tutte le librerie in una."),
+        ("ElectronicArts.EADesktop", "EA app", "FC, Battlefield, The Sims e altri giochi EA."),
+        ("Ubisoft.Connect", "Ubisoft Connect", "Assassin's Creed, Rainbow Six e gli altri Ubisoft."),
+        ("Blizzard.BattleNet", "Battle.net", "Call of Duty, Diablo, Overwatch, World of Warcraft."),
+        ("Discord.Discord", "Discord", "Chat e voce con gli amici mentre giochi."),
+    ]),
+    ("Componenti per i giochi", [
+        ("Microsoft.VCRedist.2015+.x64", "Visual C++ 2015-2022", "Serve a tantissimi giochi: risolve gli errori \"manca il file .dll\"."),
+        ("Microsoft.DirectX", "DirectX", "Componenti grafici richiesti dai giochi più vecchi."),
+    ]),
+    ("Prestazioni e hardware", [
+        ("Guru3D.Afterburner", "MSI Afterburner", "FPS e temperature durante il gioco, overclock della scheda video."),
+        ("REALiX.HWiNFO", "HWiNFO", "Tutti i sensori del PC: temperature, velocità, consumi."),
+        ("CPUID.CPU-Z", "CPU-Z", "Informazioni dettagliate su processore, RAM e scheda madre."),
+        ("CrystalDewWorld.CrystalDiskInfo", "CrystalDiskInfo", "Salute dettagliata di SSD e hard disk."),
+    ]),
+    ("Utilità", [
+        ("7zip.7zip", "7-Zip", "Apre e crea zip, rar, 7z: gratis e senza pubblicità."),
+        ("VideoLAN.VLC", "VLC", "Riproduce qualsiasi video e audio."),
+        ("voidtools.Everything", "Everything", "Trova qualsiasi file del PC in un istante."),
+        ("AntibodySoftware.WizTree", "WizTree", "Mostra cosa occupa spazio sul disco."),
+        ("Klocman.BulkCrapUninstaller", "Bulk Crap Uninstaller", "Disinstalla tutto, anche i residui."),
+        ("Microsoft.PowerToys", "PowerToys", "Strumenti extra di Microsoft per Windows."),
+        ("ShareX.ShareX", "ShareX", "Screenshot e registrazioni dello schermo."),
+        ("Notepad++.Notepad++", "Notepad++", "Il blocco note potenziato."),
+    ]),
+    ("Sicurezza", [
+        ("Malwarebytes.Malwarebytes", "Malwarebytes", "Seconda opinione contro malware e adware."),
+        ("Bitwarden.Bitwarden", "Bitwarden", "Gestore di password gratuito e open source."),
+        ("Proton.ProtonVPN", "Proton VPN", "VPN gratuita e senza limiti di traffico."),
+    ]),
+    ("Creatività", [
+        ("OBSProject.OBSStudio", "OBS Studio", "Registra e fai streaming delle tue partite."),
+        ("Audacity.Audacity", "Audacity", "Registra e modifica l'audio."),
+        ("GIMP.GIMP", "GIMP", "Modifica le immagini, alternativa gratuita a Photoshop."),
+        ("KDE.Krita", "Krita", "Disegno e pittura digitale."),
+        ("TheDocumentFoundation.LibreOffice", "LibreOffice", "Documenti, fogli di calcolo e presentazioni, gratis."),
+    ]),
+    ("Sviluppo", [
+        ("Microsoft.VisualStudioCode", "Visual Studio Code", "L'editor di codice più usato."),
+        ("Microsoft.VisualStudio.2022.Community", "Visual Studio 2022", "Per C#, C++ e Unreal Engine. Pesante: ci vuole un po'."),
+        ("Git.Git", "Git", "Per salvare le versioni del codice e usare GitHub."),
+        ("Python.Python.3.13", "Python 3.13", "Il linguaggio con cui è fatto PC Booster."),
+    ]),
+    ("Comunicazione", [
+        ("Telegram.TelegramDesktop", "Telegram", "Messaggi dal computer."),
+        ("Mozilla.Thunderbird", "Thunderbird", "Programma per la posta elettronica."),
+    ]),
+]
+CATALOG_IDS = {pid for _c, items in CATALOG for pid, _n, _d in items}
+
+
+def _installed_ids():
+    """Programmi già installati che winget riconosce (con 'winget export', affidabile in ogni lingua)."""
+    exe = _winget()
+    if not exe:
+        return None
+    import json
+    import tempfile
+    fd, out = tempfile.mkstemp(prefix="pcbooster_winget_", suffix=".json")
+    os.close(fd)
+    try:
+        winutil.run([exe, "export", "-o", out, "--accept-source-agreements", "--disable-interactivity"], timeout=180)
+        with open(out, encoding="utf-8-sig") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return set()
+    finally:
+        try:
+            os.remove(out)
+        except OSError:
+            pass
+    if not isinstance(data, dict):
+        return set()
+    ids = set()
+    for src in data.get("Sources", []):
+        for p in src.get("Packages", []):
+            if p.get("PackageIdentifier"):
+                ids.add(p["PackageIdentifier"].lower())
+    return ids
+
+
+def app_catalog():
+    if not IS_WINDOWS:
+        installed = {"valve.steam", "discord.discord", "google.chrome", "7zip.7zip"}
+    else:
+        installed = _installed_ids()
+        if installed is None:
+            return {"ok": False, "missing": True,
+                    "msg": "Manca \"Programma di installazione app\" di Microsoft: installalo dal Microsoft Store."}
+    return {"ok": True, "categories": [
+        {"name": cat, "apps": [{"id": pid, "name": n, "desc": d,
+                                "installed": pid.lower() in installed or
+                                (pid == "Mozilla.Firefox.it" and "mozilla.firefox" in installed)}
+                               for pid, n, d in items]}
+        for cat, items in CATALOG]}
+
+
+def install_app(pkg_id):
+    if pkg_id not in CATALOG_IDS:
+        return {"ok": False, "msg": "Programma non presente nel catalogo."}
+    if not IS_WINDOWS:
+        time.sleep(1.0)
+        return {"ok": True, "msg": "Installato."}
+    exe = _winget()
+    if not exe:
+        return {"ok": False, "msg": "winget non trovato."}
+    # --source winget: solo il catalogo ufficiale di winget (niente richieste del Microsoft Store)
+    with _install_lock:
+        r = winutil.run([exe, "install", "--id", pkg_id, "--exact", "--source", "winget", "--silent",
+                         "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"],
+                        timeout=3600)
+    return _winget_result(r, "Installato.")
