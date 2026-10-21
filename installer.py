@@ -80,14 +80,22 @@ def post_start_maintenance(api, tray_mod):
                     os.remove(os.path.join(os.path.dirname(old), leftover))
                 except OSError:
                     pass
-        # 2) attività e collegamenti che puntano a questo exe
+        # 2) icona come file a parte (i collegamenti la trovano anche mentre l'exe viene aggiornato)
+        try:
+            src = os.path.join(getattr(sys, "_MEIPASS", ""), "icon.ico")
+            dst = os.path.join(os.path.dirname(sys.executable), "PCBooster.ico")
+            if os.path.isfile(src) and (not os.path.isfile(dst) or os.path.getsize(src) != os.path.getsize(dst)):
+                shutil.copyfile(src, dst)
+        except OSError as e:
+            updater.log(f"Icona non copiata: {e}")
+        # 3) attività e collegamenti che puntano a questo exe
         if s.get("no_uac_prompt", True):
             launcher.enable()
         fixed = launcher.repair_shortcuts()
         if fixed:
             updater.log(f"Collegamenti riparati: {fixed}")
             tray_mod.refresh_icons()
-        # 3) se l'exe ha cambiato posto, aggiorna anche le altre attività
+        # 4) se l'exe ha cambiato posto, aggiorna anche le altre attività
         if s.get("registered_path") != sys.executable:
             try:
                 if s.get("start_with_windows"):

@@ -307,6 +307,10 @@ def _targets():
         dict(id="dism", cat="deep", label="Componenti vecchi di Windows", default=False,
              desc="Elimina le vecchie versioni dei file di sistema lasciate dagli aggiornamenti. "
                   "Può richiedere 10-20 minuti.", special="dism"),
+        dict(id="hibernate", cat="deep", label="File di ibernazione (hiberfil.sys)", default=False,
+             desc="Spegne l'ibernazione e l'avvio rapido di Windows: libera tanto spazio quanta RAM hai. "
+                  "Sconsigliato sui portatili che usi a batteria. Si può riattivare dalla Cronologia.",
+             special="hibernate"),
         dict(id="winold", cat="deep", label="Vecchia installazione di Windows (Windows.old)", default=False,
              desc="Dopo averla eliminata non potrai più tornare alla versione precedente di Windows.",
              dirs=[os.path.join(sysdrive, "Windows.old")], special="winold"),
@@ -341,6 +345,10 @@ def _targets():
     return t
 
 
+def _hiberfil_path():
+    return os.path.join((os.environ.get("SystemDrive") or "C:") + "\\", "hiberfil.sys")
+
+
 def _winold_path():
     return os.path.join((os.environ.get("SystemDrive") or "C:") + "\\", "Windows.old")
 
@@ -365,12 +373,12 @@ DEMO_SIZES = {"user_temp": 2_300_000_000, "win_temp": 310_000_000, "wu_cache": 3
               "thumbs": 180_000_000, "recycle": 640_000_000, "dns": 0, "dx_shader": 1_100_000_000,
               "nv_cache": 900_000_000, "steam": 450_000_000, "epic": 120_000_000, "discord": 380_000_000,
               "spotify": 1_500_000_000, "br_chrome": 690_000_000, "br_zen": 240_000_000, "br_edge": 310_000_000,
-              "dism": None, "winold": 0}
+              "dism": None, "winold": 0, "hibernate": 25_600_000_000}
 DEMO_ITEMS = [("user_temp", "windows"), ("win_temp", "windows"), ("wu_cache", "windows"), ("delivery", "windows"),
               ("crash", "windows"), ("dumps", "windows"), ("logs", "windows"), ("thumbs", "windows"),
               ("recycle", "windows"), ("dns", "windows"), ("br_zen", "browser"), ("br_chrome", "browser"),
               ("br_edge", "browser"), ("dx_shader", "games"), ("nv_cache", "games"), ("steam", "games"),
-              ("epic", "games"), ("discord", "apps"), ("spotify", "apps"), ("dism", "deep"), ("winold", "deep")]
+              ("epic", "games"), ("discord", "apps"), ("spotify", "apps"), ("dism", "deep"), ("hibernate", "deep"), ("winold", "deep")]
 
 
 def _send_to_recycle_bin(path):
@@ -422,11 +430,16 @@ class Cleaner:
             elif sp == "winold":
                 path = _winold_path()
                 size = _size(path) if os.path.isdir(path) else 0
+            elif sp == "hibernate":
+                try:
+                    size = os.path.getsize(_hiberfil_path())
+                except OSError:
+                    size = 0
             else:
                 size = sum(_size(p) for p in _expand(t.get("dirs")) if os.path.isdir(p))
                 size += sum(_size(f) for f in _expand(t.get("files")) if os.path.isfile(f))
-            if sp == "winold" and not size:
-                continue  # niente Windows.old: non mostrare la voce
+            if sp in ("winold", "hibernate") and not size:
+                continue  # niente Windows.old o ibernazione già spenta: non mostrare la voce
             busy = [p for p in t.get("procs", []) if p in running]
             items.append(self._row(t, size, bool(busy)))
         return {"categories": [{"id": c, "label": l} for c, l in CATEGORIES], "items": items}
@@ -451,10 +464,11 @@ class Cleaner:
         if not IS_WINDOWS:
             freed = sum(DEMO_SIZES.get(i) or 0 for i in ids)
             return {"ok": True, "freed": human_size(freed), "bytes": freed,
-                    "msg": f"Modalità demo: avrei liberato {human_size(freed)}."}
+                    "msg": f"Modalità demo: avrei liberato {human_size(freed)}.", "hibernate_off": "hibernate" in ids}
         if not self._targets:
             self.scan()
         freed, skipped, notes = 0, 0, []
+        hibernate_off = False
         for tid in ids:
             t = self._targets.get(tid)
             if not t:
@@ -487,6 +501,16 @@ class Cleaner:
                 else:
                     notes.append("La pulizia dei componenti di Windows non è riuscita (riprova dopo un riavvio).")
                 continue
+            if sp == "hibernate":
+                before = 0
+                try:
+                    before = os.path.getsize(_hiberfil_path())
+                except OSError:
+                    pass
+                if winutil.run(["powercfg", "/h", "off"], timeout=60).ok:
+                    hibernate_off = True
+                    freed += before
+                continue
             if sp == "winold":
                 path = _winold_path()
                 if not os.path.isdir(path) or os.path.basename(path).lower() != "windows.old":
@@ -510,7 +534,7 @@ class Cleaner:
             msg += f" {skipped} file erano in uso e sono stati lasciati."
         if notes:
             msg += " " + " ".join(notes)
-        return {"ok": True, "freed": human_size(freed), "bytes": freed, "msg": msg}
+        return {"ok": True, "freed": human_size(freed), "bytes": freed, "msg": msg, "hibernate_off": hibernate_off}
 
     @staticmethod
     def _wipe(t):

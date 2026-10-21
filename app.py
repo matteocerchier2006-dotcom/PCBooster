@@ -18,10 +18,11 @@ import tray
 import installer
 import history
 import diagnostics
+import i18n
 from backend import Api, is_admin, relaunch_as_admin, harden_api, IS_WINDOWS
 
 ALLOWED_PREFS = set(updater.DEFAULT_SETTINGS) - {"game_mode_state", "game_mode_opts", "game_mode_close", "last_version",
-                                                  "notified", "tray_tip_seen", "start_with_windows"}
+                                                  "notified", "tray_tip_seen", "start_with_windows", "clean_choice"}
 
 
 def resource_path(rel: str) -> str:
@@ -44,7 +45,9 @@ class AppApi(Api):
 
     # ---------- preferenze (aspetto, opzioni) ----------
     def get_prefs(self):
-        return updater.load_settings()
+        s = updater.load_settings()
+        s["sys_lang"] = "it" if i18n.windows_is_italian() else "en"    # per la lingua "automatica"
+        return s
 
     def set_prefs(self, data):
         """Salva solo preferenze conosciute e del tipo giusto (l'interfaccia non può scrivere altro)."""
@@ -62,11 +65,11 @@ class AppApi(Api):
                         clean[k] = v
         return updater.save_settings(clean)
 
+    APPEARANCE = ("theme", "accent", "font", "font_size", "radius", "compact_sidebar", "animations", "glow")
+
     def reset_prefs(self):
-        keep = {"auto_update": updater.load_settings().get("auto_update", True)}
-        defaults = dict(updater.DEFAULT_SETTINGS)
-        defaults.update(keep)
-        return updater.save_settings(defaults)
+        """Rimette l'aspetto predefinito (solo l'aspetto: il resto delle impostazioni resta com'è)."""
+        return updater.save_settings({k: updater.DEFAULT_SETTINGS[k] for k in self.APPEARANCE})
 
     # ---------- aggiornamento dell'app ----------
     def get_app_info(self):
@@ -251,7 +254,8 @@ def main():
             if not icon.start() and start_hidden:
                 icon.show_window()   # senza icona non si può restare nascosti
 
-    webview.start(on_start)
+    # icona della finestra e della barra delle applicazioni (tutte le misure, non solo quella piccola)
+    webview.start(on_start, icon=resource_path("icon.ico"))
 
 
 if __name__ == "__main__":

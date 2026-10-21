@@ -23,6 +23,7 @@ import diagnostics
 import winutil
 
 IS_WINDOWS = sys.platform == "win32"
+WIN11 = IS_WINDOWS and sys.getwindowsversion().build >= 22000
 
 if IS_WINDOWS:
     import winreg
@@ -421,7 +422,9 @@ class Api:
                 for i in range(1, 11):
                     _t.sleep(0.35)
                     self._driver_dl.state["done"] = 86_600_000 * i
-                self._driver_dl.state = {"status": "launched", "msg": "Demo: installazione avviata."}
+                self._driver_dl.state = {"status": "launched", "msg": "Demo: installazione in corso…"}
+                _t.sleep(3)
+                self._driver_dl.state = {"status": "finished", "msg": "Installazione finita: rileggo il driver installato…"}
             threading.Thread(target=fake, daemon=True).start()
             return {"ok": True}
         r = self._driver_dl.start(url, vendor)
@@ -561,6 +564,9 @@ class Api:
                 r = {"ok": True, "msg": f"{u['name']} " + ("di nuovo all'avvio." if u["enabled"] else "tolto dall'avvio.")}
             elif t == "dns":
                 r = network.restore_dns(u.get("prev"))
+            elif t == "hibernate":
+                ok = not IS_WINDOWS or winutil.run(["powercfg", "/h", "on"], timeout=60).ok
+                r = {"ok": ok, "msg": "Ibernazione riattivata." if ok else "Non riesco a riattivare l'ibernazione."}
             else:
                 r = {"ok": False, "msg": "Tipo di modifica sconosciuto."}
         except PermissionError:
@@ -619,8 +625,11 @@ class Api:
     def get_gpu_tweaks(self):
         if not IS_WINDOWS:
             return {"game_mode": True, "hags": False, "power_plan": "Bilanciato", "high_perf": False,
-                    "game_dvr": True}
+                    "game_dvr": True, "mouse_raw": getattr(self, "_demo_mouse", False),
+                    "windowed_opt": getattr(self, "_demo_windowed", False)}
         return {
+            "mouse_raw": self._mouse_accel() == 0,
+            "windowed_opt": self._windowed_opt() if WIN11 else None,
             "game_mode": self._reg_get(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\GameBar",
                                        "AutoGameModeEnabled", 1) == 1,
             "hags": self._reg_get(winreg.HKEY_LOCAL_MACHINE,
@@ -631,7 +640,45 @@ class Api:
         }
 
     TWEAK_LABELS = {"game_mode": "Modalità Gioco", "hags": "Pianificazione GPU con accelerazione hardware",
-                    "high_perf": "Prestazioni elevate", "game_dvr": "Registrazione in background"}
+                    "high_perf": "Prestazioni elevate", "game_dvr": "Registrazione in background",
+                    "mouse_raw": "Mouse senza accelerazione", "windowed_opt": "Ottimizzazioni per i giochi in finestra"}
+
+    # ---------- mouse: "Migliora precisione puntatore" (accelerazione) ----------
+    @staticmethod
+    def _mouse_accel():
+        arr = (ctypes.c_int * 3)()
+        if not ctypes.windll.user32.SystemParametersInfoW(0x0003, 0, arr, 0):     # SPI_GETMOUSE
+            return None
+        return arr[2]
+
+    @staticmethod
+    def _set_mouse_accel(on):
+        # valori predefiniti di Windows: soglie 6 e 10, accelerazione 1
+        arr = (ctypes.c_int * 3)(*((6, 10, 1) if on else (0, 0, 0)))
+        # SPI_SETMOUSE, salvato nel profilo (SPIF_UPDATEINIFILE) e comunicato alle app (SPIF_SENDCHANGE)
+        return bool(ctypes.windll.user32.SystemParametersInfoW(0x0004, 0, arr, 0x01 | 0x02))
+
+    # ---------- giochi in finestra (Windows 11) ----------
+    _DX_KEY = r"Software\Microsoft\DirectX\UserGpuPreferences"
+
+    def _dx_settings(self):
+        raw = self._reg_get(winreg.HKEY_CURRENT_USER, self._DX_KEY, "DirectXUserGlobalSettings", "") or ""
+        out = {}
+        for part in str(raw).split(";"):
+            if "=" in part:
+                k, v = part.split("=", 1)
+                out[k.strip()] = v.strip()
+        return out
+
+    def _windowed_opt(self):
+        return self._dx_settings().get("SwapEffectUpgradeEnable") == "1"
+
+    def _set_windowed_opt(self, on):
+        d = self._dx_settings()        # le altre impostazioni di DirectX restano com'erano
+        d["SwapEffectUpgradeEnable"] = "1" if on else "0"
+        text = "".join(f"{k}={v};" for k, v in d.items())
+        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, self._DX_KEY, 0, winreg.KEY_SET_VALUE) as k:
+            winreg.SetValueEx(k, "DirectXUserGlobalSettings", 0, winreg.REG_SZ, text)
 
     def set_gpu_tweak(self, name, enabled, record=True):
         undo = None
@@ -647,8 +694,22 @@ class Api:
 
     def _apply_tweak(self, name, enabled):
         if not IS_WINDOWS:
+            if name == "mouse_raw":
+                self._demo_mouse = bool(enabled)
+            if name == "windowed_opt":
+                self._demo_windowed = bool(enabled)
             return {"ok": True, "msg": "Modalità demo: nessuna modifica fatta."}
         try:
+            if name == "mouse_raw":
+                if not self._set_mouse_accel(not enabled):
+                    return {"ok": False, "msg": "Non riesco a cambiare l'impostazione del mouse."}
+                return {"ok": True, "msg": "Accelerazione del mouse " + ("spenta: mira più precisa." if enabled else "riaccesa.")}
+            if name == "windowed_opt":
+                if not WIN11:
+                    return {"ok": False, "msg": "Questa opzione c'è solo su Windows 11."}
+                self._set_windowed_opt(bool(enabled))
+                return {"ok": True, "msg": "Ottimizzazioni per i giochi in finestra " +
+                                           ("attivate. Valgono dal prossimo avvio del gioco." if enabled else "disattivate.")}
             if name == "game_mode":
                 self._reg_set(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\GameBar",
                               "AutoGameModeEnabled", 1 if enabled else 0)
@@ -719,7 +780,7 @@ class Api:
         return {"ok": False, "msg": "App del produttore non trovata: apro il sito ufficiale."}
 
     # ================= Ottimizza tutto =================
-    OPTIMAL = [("game_mode", True), ("hags", True), ("high_perf", True), ("game_dvr", False)]
+    OPTIMAL = [("game_mode", True), ("hags", True), ("high_perf", True), ("game_dvr", False), ("windowed_opt", True)]
 
     def optimize_all(self, restore_point=True):
         notes = []
@@ -727,7 +788,9 @@ class Api:
             rp = self.create_restore_point()
             if not rp["ok"]:
                 notes.append("Punto di ripristino non creato.")
-        results = [self.set_gpu_tweak(name, value) for name, value in self.OPTIMAL]
+        current = self.get_gpu_tweaks()
+        # salta le opzioni che questo PC non ha (es. giochi in finestra su Windows 10)
+        results = [self.set_gpu_tweak(name, value) for name, value in self.OPTIMAL if current.get(name, False) is not None]
         done = sum(1 for r in results if r["ok"])
         failed = [r["msg"] for r in results if not r["ok"]]
         msg = f"{done} ottimizzazioni su {len(results)} applicate."
@@ -766,10 +829,49 @@ class Api:
         return self._cleaner.scan()
 
     def clean_junk(self, ids):
+        ids = [i for i in (ids or []) if isinstance(i, str)]
         r = self._cleaner.clean(ids)
         if r.get("ok"):
             history.add("clean", f"Pulizia: liberati {r.get('freed')}", detail=f"{len(ids)} voci pulite")
+            if "hibernate" in ids and r.get("hibernate_off"):
+                history.add("clean", "Ibernazione disattivata", detail="Libera lo spazio del file hiberfil.sys",
+                            undo={"type": "hibernate"})
         return r
+
+    def optimize_drives(self):
+        """Ottimizza le unità come fa Windows: TRIM per gli SSD, deframmentazione per gli hard disk."""
+        if not IS_WINDOWS:
+            import time as _t
+            _t.sleep(2)
+            return {"ok": True, "msg": "Demo: C: ottimizzata (SSD), D: ottimizzata (SSD)."}
+        if not is_admin():
+            return {"ok": False, "msg": "Servono i permessi di amministratore."}
+        r = winutil.ps_run(
+            "$res=@(); Get-Volume | Where-Object { $_.DriveLetter -and $_.DriveType -eq 'Fixed' -and $_.FileSystem -eq 'NTFS' } |"
+            " ForEach-Object { $l=$_.DriveLetter; try { Optimize-Volume -DriveLetter $l -ErrorAction Stop; $res += \"$($l):OK\" }"
+            " catch { $res += \"$($l):ERR\" } }; $res -join ' '", 2 * 3600)
+        parts = [x for x in r.out.split() if ":" in x]
+        ok = [x.split(":")[0] + ":" for x in parts if x.endswith("OK")]
+        bad = [x.split(":")[0] + ":" for x in parts if x.endswith("ERR")]
+        if r.timed_out:
+            return {"ok": bool(ok), "msg": "L'ottimizzazione ci mette molto: Windows la finirà da solo nei prossimi giorni."}
+        if not ok:
+            return {"ok": False, "msg": "Non sono riuscito a ottimizzare le unità."}
+        history.add("disk", "Unità ottimizzate: " + " ".join(ok))
+        msg = "Unità ottimizzate: " + " ".join(ok) + "."
+        if bad:
+            msg += " Non riuscite: " + " ".join(bad) + "."
+        return {"ok": True, "msg": msg}
+
+    def set_clean_choice(self, choice):
+        """Ricorda le voci della pulizia che hai acceso o spento (vale anche per la pulizia automatica)."""
+        import updater
+        clean = {}
+        for k, v in (choice or {}).items() if isinstance(choice, dict) else []:
+            if isinstance(k, str) and re.fullmatch(r"[a-z0-9_]{1,40}", k) and isinstance(v, bool):
+                clean[k] = v
+        updater.save_settings({"clean_choice": clean})
+        return {"ok": True}
 
     def find_large_files(self, min_mb=250):
         return self._cleaner.find_large_files(int(min_mb))
@@ -816,8 +918,12 @@ class Api:
 
     def auto_clean(self):
         """Chiamata dall'attività pianificata: pulisce le voci sicure, senza finestra."""
+        import updater
+        choice = updater.load_settings().get("clean_choice") or {}
         scan = self._cleaner.scan()
-        ids = [i["id"] for i in scan["items"] if i["default"] and i["id"] not in ("recycle",)]
+        # le voci scelte da te; per le altre la scelta consigliata. Mai le operazioni pesanti o irreversibili.
+        never = {"recycle", "dism", "winold", "hibernate"}
+        ids = [i["id"] for i in scan["items"] if i["id"] not in never and choice.get(i["id"], i["default"])]
         return self._cleaner.clean(ids)
 
     # ================= Aggiornamenti di Windows =================

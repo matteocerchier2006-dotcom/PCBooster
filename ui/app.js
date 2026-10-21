@@ -41,6 +41,7 @@ async function ready() {
   started = true;
   api = wrapApi(window.pywebview.api);
   state.prefs = await api.get_prefs();
+  I18N.start(state.prefs.lang, state.prefs.sys_lang);
   applyPrefs();
   bindSettings();
   bindTray();
@@ -76,7 +77,7 @@ function confirmBox(title, text, yesLabel = 'Conferma', danger = false) {
 const fmtBytes = n => { if (n == null) return '—'; const u = ['B','KB','MB','GB','TB']; let i = 0; while (n >= 1024 && i < 4) { n /= 1024; i++; } return (i < 2 ? n.toFixed(0) : n.toFixed(1)) + ' ' + u[i]; };
 const fmtMB = mb => mb >= 1024 ? (mb / 1024).toFixed(1) + ' GB' : mb ? mb + ' MB' : '—';
 const level = p => p >= 90 ? 'bad' : p >= 75 ? 'warn' : '';
-const plural = (n, one, many) => n === 1 ? one : many;
+const plural = (n, one, many) => I18N.tr(n === 1 ? one : many);
 function bindSeg(el, value, onPick) {
   $$('button', el).forEach(b => {
     b.classList.toggle('on', b.dataset.v === value);
@@ -125,6 +126,12 @@ function bindSettings() {
   $('#accentCustom').value = p.accent || '#8b7bff';
   $('#accentCustom').oninput = e => { setPref('accent', e.target.value); markAccent(); };
   markAccent();
+  $('#langPick').value = p.lang || 'auto';
+  $('#langPick').onchange = async e => {
+    state.prefs.lang = e.target.value;
+    await api.set_prefs(state.prefs);
+    location.reload();          // la pagina si riapre nella lingua scelta
+  };
   $('#startPick').value = p.start_page || 'home';
   $('#startPick').onchange = e => setPref('start_page', e.target.value);
   $$('[data-pref]').forEach(i => {
@@ -249,8 +256,8 @@ async function runCheckup() {
     }),
     run('tw', async () => {
       const tw = await api.get_gpu_tweaks();
-      const missing = [['game_mode', true, 'Modalità Gioco'], ['hags', true, 'pianificazione GPU'], ['high_perf', true, 'Prestazioni elevate'], ['game_dvr', false, 'registrazione in background spenta']]
-        .filter(([k, want]) => !!tw[k] !== want).map(x => x[2]);
+      const missing = [['game_mode', true, 'Modalità Gioco'], ['hags', true, 'pianificazione GPU'], ['high_perf', true, 'Prestazioni elevate'], ['game_dvr', false, 'registrazione in background spenta'], ['windowed_opt', true, 'giochi in finestra']]
+        .filter(([k, want]) => tw[k] !== null && tw[k] !== undefined && !!tw[k] !== want).map(x => x[2]);
       if (missing.length) { penalty += missing.length * 3; fillFinding(steps.tw, 'warn', `${missing.length} ${plural(missing.length, 'ottimizzazione', 'ottimizzazioni')} per i giochi non ${plural(missing.length, 'attiva', 'attive')}`, 'Mancano: ' + missing.join(', ') + '.', 'Ottimizza', () => $('#optimizeBtn').click()); }
       else fillFinding(steps.tw, 'ok', 'Impostazioni per i giochi a posto', 'Tutte le ottimizzazioni sono attive.');
     }),
@@ -324,7 +331,7 @@ $('#optimizeBtn').addEventListener('click', async e => {
   const btn = e.currentTarget;
   const rp = state.prefs.restore_before_optimize !== false;
   const ok = await confirmBox('Ottimizzare il PC per i giochi?',
-    (rp ? 'Prima creo un punto di ripristino, poi ' : '') + 'attivo Modalità Gioco, pianificazione GPU e Prestazioni elevate, spengo la registrazione in background e tolgo dall\'avvio i programmi non necessari. Puoi annullare tutto dalle sezioni Scheda video e Avvio automatico.', 'Ottimizza');
+    (rp ? 'Prima creo un punto di ripristino, poi ' : '') + 'attivo Modalità Gioco, pianificazione GPU, Prestazioni elevate e le ottimizzazioni per i giochi in finestra, spengo la registrazione in background e tolgo dall\'avvio i programmi non necessari. Puoi annullare tutto dalle sezioni Scheda video e Avvio automatico.', 'Ottimizza');
   if (!ok) return;
   busy(btn, async () => {
     const r1 = await api.optimize_all(rp);
@@ -356,9 +363,10 @@ function renderJunk() {
     list.forEach(it => {
       const row = h('label', 'item' + (it.bytes === 0 && it.special !== 'dns' ? ' zero' : ''));
       const ck = h('input', 'ck'); ck.type = 'checkbox'; ck.value = it.id; ck.dataset.cat = cat.id;
-      ck.checked = it.default && (it.bytes !== 0 || it.special === 'dns');
+      const choice = (state.prefs.clean_choice || {})[it.id];
+      ck.checked = (choice !== undefined ? choice : it.default) && (it.bytes !== 0 || it.special === 'dns');
       ck.disabled = it.bytes === 0 && it.special !== 'dns';
-      ck.addEventListener('change', () => { syncGroup(); updateCleanTotal(); });
+      ck.addEventListener('change', () => { rememberClean([ck]); syncGroup(); updateCleanTotal(); });
       const mid = h('div'); const name = h('b', null, it.label);
       if (it.busy) { const t = h('span', 'tag warn', 'aperto'); t.style.display = 'inline-block'; t.title = 'Chiudilo per pulire tutto'; name.append(t); }
       mid.append(name, h('span', null, it.desc));
@@ -374,11 +382,18 @@ function renderJunk() {
       gsize.textContent = on ? fmtBytes(sel) : fmtBytes(all);
       gsize.style.color = on ? '' : 'var(--muted)';
     };
-    gck.onchange = () => { $$('input.ck', body).filter(c => !c.disabled).forEach(c => c.checked = gck.checked); syncGroup(); updateCleanTotal(); };
+    gck.onchange = () => { const cks = $$('input.ck', body).filter(c => !c.disabled); cks.forEach(c => c.checked = gck.checked); rememberClean(cks); syncGroup(); updateCleanTotal(); };
     g.append(head, body); box.append(g); syncGroup();
   });
   $('#cleanBar').hidden = false;
   updateCleanTotal();
+}
+// Le scelte fatte con le spunte restano: non tornano quelle consigliate a ogni analisi.
+function rememberClean(cks) {
+  const c = Object.assign({}, state.prefs.clean_choice || {});
+  cks.forEach(k => { c[k.value] = k.checked; });
+  state.prefs.clean_choice = c;
+  api.set_clean_choice(c);
 }
 function selectedJunk() { return $$('#cleanGroups .item input.ck:checked').map(i => i.value); }
 function updateCleanTotal() {
@@ -394,6 +409,7 @@ $('#cleanBtn').addEventListener('click', async e => {
   if (ids.includes('recycle')) warn.push('i file nel Cestino verranno eliminati per sempre');
   if (ids.includes('winold')) warn.push('non potrai più tornare alla versione precedente di Windows');
   if (ids.includes('dism')) warn.push('la pulizia dei componenti di Windows può richiedere 10-20 minuti');
+  if (ids.includes('hibernate')) warn.push('l\'ibernazione e l\'avvio rapido di Windows verranno spenti (puoi riattivarli dalla Cronologia)');
   if (warn.length && !await confirmBox('Sei sicuro?', 'Attenzione: ' + warn.join('; ') + '.', 'Pulisci', ids.includes('winold'))) return;
   const busyItems = state.junk.items.filter(i => ids.includes(i.id) && i.busy).map(i => i.label);
   if (busyItems.length) toast(`${busyItems.join(', ')} ${plural(busyItems.length, 'è aperto', 'sono aperti')}: chiudi per pulire tutto, intanto pulisco il resto.`);
@@ -407,9 +423,8 @@ $('#cleanBtn').addEventListener('click', async e => {
 });
 
 // ================= Spazio su disco =================
-let drivesLoaded = false;
 async function loadDrives() {
-  if (drivesLoaded) return; drivesLoaded = true;
+  paintFreeJunk();
   const drives = await api.get_drives();
   const box = $('#drives'); box.innerHTML = '';
   drives.forEach(d => {
@@ -420,6 +435,20 @@ async function loadDrives() {
     box.append(c);
   });
 }
+// ---------- Libera spazio: le tre strade, direttamente da qui ----------
+function paintFreeJunk() {
+  if (!state.junk || !state.junk.items) return;
+  const tot = state.junk.items.filter(i => i.default).reduce((a, i) => a + (i.bytes || 0), 0);
+  if (tot > 0) $('#freeJunkText').textContent = `${fmtBytes(tot)} di file inutili si possono eliminare senza rischi.`;
+}
+$('#optDrives').addEventListener('click', e => busy(e.currentTarget, async () => {
+  toast('Ottimizzo le unità: con un hard disk può volerci un po\'. Puoi continuare a usare il PC.');
+  const r = await api.optimize_drives(); toast(r.msg, r.ok);
+}));
+$('#freeClean').addEventListener('click', () => { go('clean'); if (!state.junk) $('#scanBtn').click(); });
+$('#freeLarge').addEventListener('click', () => { $('#largePanel').scrollIntoView({ behavior: 'smooth', block: 'start' }); $('#largeBtn').click(); });
+$('#freeApps').addEventListener('click', () => go('apps'));
+
 $('#largeBtn').addEventListener('click', e => busy(e.currentTarget, async () => {
   $('#largeList').innerHTML = '<p class="empty">Cerco nelle tue cartelle…</p>';
   state.large = await api.find_large_files(+$('#largeMin').value); renderLarge();
@@ -449,7 +478,7 @@ function renderLarge() {
 }
 
 // ================= Scheda video =================
-$('#gpuRefresh').addEventListener('click', e => busy(e.currentTarget, loadGpu));
+$('#gpuRefresh').addEventListener('click', e => busy(e.currentTarget, () => { state.drv = {}; return loadGpu(); }));
 async function loadGpu() { state.gpus = await api.get_gpu_info(); renderGpu(); startGpuLive(); }
 function renderGpu() {
   const box = $('#gpuList'); box.innerHTML = '';
@@ -460,7 +489,7 @@ function renderGpu() {
     const det = h('div', 'details');
     const cell = (k, v, sm) => { const d = h('div'); d.append(h('span', null, k), h('b', null, v || 'n.d.')); if (sm) d.append(h('small', null, sm)); det.append(d); };
     cell('Versione driver', g.driver_version, g.driver_raw && g.driver_raw !== g.driver_version ? 'Windows: ' + g.driver_raw : '');
-    cell('Data del driver', g.driver_date ? new Date(g.driver_date).toLocaleDateString('it-IT', { day: 'numeric', month: 'long', year: 'numeric' }) : '', g.age_days != null ? `${g.age_days} giorni fa` : '');
+    cell('Data del driver', g.driver_date ? new Date(g.driver_date).toLocaleDateString(I18N.locale(), { day: 'numeric', month: 'long', year: 'numeric' }) : '', g.age_days != null ? `${g.age_days} giorni fa` : '');
     cell('Memoria video', g.vram);
     if (g.display) cell('Schermo', g.display);
     c.append(head, det);
@@ -519,7 +548,7 @@ async function paintDriver(g, box) {
 }
 function fmtDate(s) {
   const d = new Date(s); if (isNaN(d)) return s;
-  return d.toLocaleDateString('it-IT', { day: 'numeric', month: 'long', year: 'numeric' });
+  return d.toLocaleDateString(I18N.locale(), { day: 'numeric', month: 'long', year: 'numeric' });
 }
 async function startDriverDownload(g, r, box) {
   const ok = await confirmBox(`Installare il driver ${r.version}?`, 'Lo scarico dal sito ufficiale ' + (g.vendor === 'nvidia' ? 'NVIDIA' : 'AMD') +
@@ -529,6 +558,7 @@ async function startDriverDownload(g, r, box) {
   if (!s.ok) return toast(s.msg, false);
   box.innerHTML = '';
   const p = h('p', null, 'Download in corso…'), bar = h('div', 'bar'), em = h('em'); bar.append(em);
+  let announced = false;
   box.append(p, bar);
   const t = setInterval(async () => {
     const st = await api.driver_progress();
@@ -538,12 +568,27 @@ async function startDriverDownload(g, r, box) {
       p.textContent = `Download in corso: ${fmtBytes(st.done)}` + (st.total ? ` di ${fmtBytes(st.total)} (${pct}%)` : '');
     } else if (st.status === 'installing') {
       em.style.width = '100%'; p.textContent = st.msg || 'Controllo il file scaricato…';
+    } else if (st.status === 'launched') {
+      if (!announced) { announced = true; toast(st.msg); }
+      em.style.width = '100%'; bar.classList.add('pulse'); p.textContent = st.msg;
     } else {
       clearInterval(t);
-      if (st.status === 'launched') { em.style.width = '100%'; p.textContent = st.msg; toast(st.msg); }
+      if (st.status === 'finished') { p.textContent = st.msg; driverInstalled(g); }
       else if (st.status === 'error') { p.textContent = st.msg; toast(st.msg, false); }
     }
-  }, 700);
+  }, 1000);
+}
+// Finita l'installazione del driver: rilegge la scheda video e dice se la versione è cambiata
+async function driverInstalled(g) {
+  const before = g.driver_version;
+  state.drv = {}; state.gpus = null;
+  await new Promise(r => setTimeout(r, 4000));      // Windows aggiorna i dati del driver con qualche secondo di ritardo
+  const gpus = await api.get_gpu_info(); state.gpus = gpus;
+  const now = gpus.find(x => x.name === g.name) || gpus[0];
+  if (now && now.driver_version !== before) toast(`Driver aggiornato: ora hai il ${now.driver_version}.`);
+  else toast('Installazione finita. Se il driver non risulta aggiornato, riavvia il PC e premi Ricontrolla.', true);
+  if (state.view === 'gpu') { renderGpu(); startGpuLive(); }
+  loadTweaks();
 }
 let gpuTimer;
 function startGpuLive() {
@@ -561,7 +606,11 @@ function startGpuLive() {
 }
 async function loadTweaks() {
   const t = await api.get_gpu_tweaks();
-  $$('[data-tweak]').forEach(i => { i.checked = !!t[i.dataset.tweak]; });
+  $$('[data-tweak]').forEach(i => {
+    const v = t[i.dataset.tweak];
+    i.closest('.toggle').hidden = v === null;          // opzione che questo PC non ha (es. Windows 10)
+    i.checked = !!v;
+  });
   $('#planName').textContent = 'Piano attuale: ' + t.power_plan;
 }
 $$('[data-tweak]').forEach(i => i.addEventListener('change', async () => {
@@ -937,7 +986,7 @@ function renderDiskHealth() {
     cell('Capacità', d.size_gb >= 1000 ? (d.size_gb / 1024).toFixed(1) + ' TB' : d.size_gb + ' GB');
     if (d.life != null) { const bar = h('i', 'lifebar'), em = h('em', d.life < 20 ? 'bad' : d.life < 40 ? 'warn' : ''); em.style.width = d.life + '%'; bar.append(em); cell('Vita residua', d.life + '%', bar); }
     cell('Temperatura', d.temp ? d.temp + ' °C' : 'n.d.');
-    if (d.hours != null) cell('Ore di accensione', `${Number(d.hours).toLocaleString('it-IT')} h`, h('small', null, `circa ${Math.round(d.hours / 24)} giorni`));
+    if (d.hours != null) cell('Ore di accensione', `${Number(d.hours).toLocaleString(I18N.locale())} h`, h('small', null, `circa ${Math.round(d.hours / 24)} giorni`));
     if (d.errors) cell('Errori di lettura/scrittura', String(d.errors));
     c.append(det); wrap.append(c);
   });
@@ -1099,7 +1148,7 @@ async function loadHistory() {
     const d = e.when.slice(0, 10);
     if (d !== day) {
       day = d;
-      box.append(h('div', 'hday', d === today ? 'Oggi' : new Date(d).toLocaleDateString('it-IT', { weekday: 'long', day: 'numeric', month: 'long' })));
+      box.append(h('div', 'hday', d === today ? 'Oggi' : new Date(d).toLocaleDateString(I18N.locale(), { weekday: 'long', day: 'numeric', month: 'long' })));
       list = h('div', 'hlist'); box.append(list);
     }
     const row = h('div', 'hrow' + (e.undone ? ' undone' : ''));

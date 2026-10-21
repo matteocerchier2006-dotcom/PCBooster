@@ -69,6 +69,10 @@ DEFAULT_SETTINGS = {
     "game_mode_state": None,
     "game_mode_opts": {"power": True, "ram": True, "close": True, "reopen": True},
     "game_mode_close": None,
+    # pulizia: le voci che hai acceso o spento tu (le altre seguono la scelta consigliata)
+    "clean_choice": {},
+    # lingua: auto (come Windows), it, en
+    "lang": "auto",
 }
 def _settings_path():
     base = os.environ.get("APPDATA") or os.path.expanduser("~")

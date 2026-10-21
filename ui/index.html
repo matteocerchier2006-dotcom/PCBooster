@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="it" data-theme="dark" data-radius="medium" data-size="normal" data-font="barlow">
+<html lang="it" class="i18n-wait" data-theme="dark" data-radius="medium" data-size="normal" data-font="barlow">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -100,7 +100,7 @@
           </div>
         </div>
         <div class="panel">
-          <div class="panel-head"><h2>App aperte</h2><button class="btn small" id="gameRefresh">Aggiorna</button></div>
+          <div class="panel-head"><h2>App aperte</h2><button class="btn small" id="gameRefresh">Aggiorna elenco</button></div>
           <p class="empty" style="margin-bottom:10px">Steam, Epic e gli altri launcher, i driver e Windows non vengono mai chiusi. Le tue scelte vengono ricordate.</p>
           <div class="list" id="gameApps"></div>
         </div>
@@ -134,10 +134,18 @@
       </header>
       <div class="drives" id="drives"></div>
       <div class="panel">
-        <div class="panel-head"><h2>Salute dei dischi</h2><button class="btn small" id="healthRefresh">Ricontrolla</button></div>
-        <div id="diskHealth"><p class="empty">Leggo lo stato dei dischi…</p></div>
+        <div class="panel-head"><h2>Libera spazio</h2></div>
+        <div class="freeopts">
+          <div class="freeopt"><b>File inutili</b><span id="freeJunkText">Temporanei, cache e vecchi aggiornamenti: si eliminano senza rischi.</span><button class="btn primary small" id="freeClean">Pulisci</button></div>
+          <div class="freeopt"><b>File grandi</b><span>Video, archivi e installazioni dimenticati nelle tue cartelle.</span><button class="btn small" id="freeLarge">Cerca</button></div>
+          <div class="freeopt"><b>Giochi e app</b><span>Disinstalla quelli che non usi più: spesso sono i più pesanti.</span><button class="btn small" id="freeApps">Apri l'elenco</button></div>
+        </div>
       </div>
       <div class="panel">
+        <div class="panel-head"><h2>Salute dei dischi</h2><div class="row-actions"><button class="btn small" id="optDrives" title="TRIM per gli SSD, deframmentazione per gli hard disk: come fa Windows, ma subito.">Ottimizza le unità</button><button class="btn small" id="healthRefresh">Ricontrolla</button></div></div>
+        <div id="diskHealth"><p class="empty">Leggo lo stato dei dischi…</p></div>
+      </div>
+      <div class="panel" id="largePanel">
         <div class="panel-head">
           <h2>File grandi</h2>
           <div class="row-actions">
@@ -169,6 +177,8 @@
           <label class="toggle"><div><b>Pianificazione GPU con accelerazione hardware</b><span>La scheda video gestisce da sola la sua memoria: meno latenza. Richiede il riavvio.</span></div><input type="checkbox" data-tweak="hags"><i class="sw"></i></label>
           <label class="toggle"><div><b>Prestazioni elevate</b><span>Il processore non rallenta per risparmiare energia. Consuma un po' di più.</span><small id="planName"></small></div><input type="checkbox" data-tweak="high_perf"><i class="sw"></i></label>
           <label class="toggle"><div><b>Registrazione in background (Xbox Game Bar)</b><span>Registra di continuo gli ultimi minuti di gioco. Spenta libera risorse.</span></div><input type="checkbox" data-tweak="game_dvr"><i class="sw"></i></label>
+          <label class="toggle" data-tweak-row="windowed_opt"><div><b>Ottimizzazioni per i giochi in finestra</b><span>Meno ritardo e più fluidità nei giochi in finestra o "finestra senza bordi". Solo Windows 11.</span></div><input type="checkbox" data-tweak="windowed_opt"><i class="sw"></i></label>
+          <label class="toggle"><div><b>Mouse senza accelerazione</b><span>Il puntatore si muove sempre della stessa quantità: mira più precisa e costante nei giochi. Se ti trovi peggio, riaccendi l'accelerazione.</span></div><input type="checkbox" data-tweak="mouse_raw"><i class="sw"></i></label>
         </div>
       </div>
     </section>
@@ -202,7 +212,7 @@
           <h1>Installa app</h1>
           <p class="sub">Programmi gratuiti e sicuri, scaricati dai siti ufficiali tramite winget, lo strumento di Microsoft. Niente siti falsi, niente pubblicità, niente programmi nascosti.</p>
         </div>
-        <button class="btn" id="catRefresh">Aggiorna</button>
+        <button class="btn" id="catRefresh">Aggiorna elenco</button>
       </header>
       <div id="catalog"><p class="empty">Controllo quali programmi hai già…</p></div>
       <div class="cleanbar" id="installBar" hidden>
@@ -371,6 +381,12 @@
           </div>
         </div>
         <div class="setting">
+          <div><b>Lingua</b><span>Language · Come Windows, o scegli tu.</span></div>
+          <label class="select"><select id="langPick">
+            <option value="auto">Automatica</option><option value="it">Italiano</option><option value="en">English</option>
+          </select></label>
+        </div>
+        <div class="setting">
           <div><b>Pagina iniziale</b><span>Quella che si apre quando avvii l'app.</span></div>
           <label class="select"><select id="startPick">
             <option value="home">Panoramica</option><option value="game">Modalità partita</option><option value="clean">Pulizia</option><option value="disk">Dischi</option>
@@ -457,6 +473,9 @@
   </form>
 </dialog>
 
+<script>setTimeout(() => document.documentElement.classList.remove('i18n-wait'), 2500);</script>
+<script src="lang-en.js"></script>
+<script src="i18n.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

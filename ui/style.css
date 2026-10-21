@@ -469,3 +469,17 @@ dialog .row { display: flex; justify-content: flex-end; gap: 10px; }
 .hrow time { color: var(--muted); font-size: .85em; font-variant-numeric: tabular-nums; }
 .hrow.undone b { text-decoration: line-through; color: var(--muted); }
 .threat > .tag { align-self: start; }
+
+/* barra "in corso" (installazione del driver) */
+.bar.pulse em { animation: barpulse 1.4s ease-in-out infinite; }
+@keyframes barpulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+
+/* Dischi → Libera spazio */
+.freeopts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.freeopt { display: flex; flex-direction: column; gap: 6px; padding: 14px; border-radius: var(--r-md); background: var(--surface-2); border: 1px solid var(--line); }
+.freeopt span { color: var(--muted); font-size: .9em; flex: 1; }
+.freeopt .btn { align-self: flex-start; margin-top: 4px; }
+@media (max-width: 900px) { .freeopts { grid-template-columns: 1fr; } }
+
+/* finché la lingua non è pronta la pagina non si vede (evita il lampo in italiano) */
+html.i18n-wait body { visibility: hidden; }

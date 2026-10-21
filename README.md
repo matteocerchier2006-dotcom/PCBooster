@@ -7,9 +7,9 @@ App per Windows 10/11 che tiene in forma il PC: driver della scheda video, aggio
 - **Modalità partita**: prima di giocare attiva Prestazioni elevate, libera la RAM e chiude le app scelte; alla fine rimette tutto com'era.
 - **Panoramica**: voto da 0 a 100 sullo stato del PC, specifiche, uso di CPU, RAM e disco, e la lista di cosa sistemare.
 - **Pulizia**: temporanei, Windows Update, report e dump di errore, log, cache di Chrome/Edge/Brave/Firefox/Zen/Opera/Vivaldi, Discord, Spotify, Steam, Epic, cache shader e pulizia profonda (componenti di Windows, Windows.old).
-- **Dischi**: spazio libero, salute di SSD e hard disk (stato, vita residua, temperatura, ore di accensione) e ricerca dei file grandi.
+- **Dischi**: spazio libero, Libera spazio, salute di SSD e hard disk (stato, vita residua, temperatura, ore di accensione), ottimizzazione delle unità (TRIM / deframmentazione) e ricerca dei file grandi.
 - **Sicurezza**: Microsoft Defender (controllo veloce, completo e offline, definizioni, minacce e rimozione) e firewall.
-- **Scheda video**: versione driver come la mostra il produttore, memoria video reale, schermo, temperatura e utilizzo in tempo reale (NVIDIA), ottimizzazioni per i giochi.
+- **Scheda video**: versione driver come la mostra il produttore, memoria video reale, schermo, temperatura e utilizzo in tempo reale (NVIDIA), ottimizzazioni per i giochi (anche giochi in finestra e mouse senza accelerazione).
 - **Aggiornamenti**: processore, scheda madre, BIOS, Windows Update e aggiornamento di tutti i programmi con winget.
 - **Driver NVIDIA e AMD**: controlla online l'ultima versione, la scarica e apre l'installazione ufficiale.
 - **Avvio automatico** e **App e giochi**.
@@ -17,6 +17,7 @@ App per Windows 10/11 che tiene in forma il PC: driver della scheda video, aggio
 - **Rete**: test di velocità, ping verso i server di gioco, prova dei DNS e cambio con un clic.
 - **Cronologia**: tutto quello che l'app cambia, con il tasto Annulla per ottimizzazioni, avvio automatico e DNS.
 - **Segnala un problema**: crea un report sul desktop (nome utente nascosto) e apre la pagina per segnalarlo su GitHub.
+- **Italiano e inglese**: la lingua segue quella di Windows, oppure la scegli in Impostazioni → Aspetto.
 - **Icona vicino all'orologio**: resta attivo chiudendo la finestra, parte con Windows, manda notifiche (driver nuovo, aggiornamenti, spazio da liberare) e dal menu attiva Modalità partita e Pulizia veloce.
 - **Impostazioni**: temi, colori, caratteri, angoli, barra compatta; aggiornamento automatico; pulizia programmata; punto di ripristino.
 
@@ -51,6 +52,7 @@ GitHub crea da solo `PCBooster.exe` ogni volta che pubblichi una nuova release. 
 - `network.py`: test di velocità, ping e DNS
 - `history.py`: cronologia e Annulla
 - `diagnostics.py`: registro degli errori e report dei problemi
+- `i18n.py`, `ui/i18n.js`, `ui/lang-en.js`: lingue (il dizionario inglese è in `ui/lang-en.js`)
 - `winutil.py`: comandi di Windows (PowerShell, schtasks…) con tempo massimo e salvataggi sicuri
 - `ui/`: interfaccia (HTML, CSS, JavaScript)
 - `.github/workflows/pubblica.yml`: istruzioni per GitHub su come creare l'exe

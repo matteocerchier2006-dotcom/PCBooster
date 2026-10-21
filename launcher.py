@@ -54,11 +54,15 @@ def run_task():
 
 
 SHORTCUT_PS = r"""
+function Get-PCBIcon($exe) {
+  $ico = Join-Path (Split-Path $exe) 'PCBooster.ico'
+  if (Test-Path -LiteralPath $ico) { "$ico,0" } else { "$exe,0" }
+}
 function Set-PCBShortcut($path, $exe) {
   $ws = New-Object -ComObject WScript.Shell
   $l = $ws.CreateShortcut($path)
   $l.TargetPath = $exe; $l.Arguments = ''; $l.WorkingDirectory = (Split-Path $exe)
-  $l.IconLocation = "$exe,0"; $l.Description = 'PC Booster'; $l.Save()
+  $l.IconLocation = (Get-PCBIcon $exe); $l.Description = 'PC Booster'; $l.Save()
 }
 """
 
@@ -107,7 +111,7 @@ def repair_shortcuts():
         "foreach($d in $dirs){ if(Test-Path $d){ Get-ChildItem -Path $d -Filter *.lnk -ErrorAction SilentlyContinue | ForEach-Object {"
         "  $l=$ws.CreateShortcut($_.FullName);"
         "  $old = ($l.TargetPath -match '(?i)PC ?Booster[^\\\\]*\\.exe') -or (($l.TargetPath -like '*schtasks.exe') -and ($l.Arguments -like '*PC Booster - Avvio*'));"
-        f"  if($old -and ($l.TargetPath -ne '{exe}' -or $l.Arguments)){{ Set-PCBShortcut $_.FullName '{exe}'; $n++ }}"
+        f"  if($old -and ($l.TargetPath -ne '{exe}' -or $l.Arguments -or $l.IconLocation -ne (Get-PCBIcon '{exe}'))){{ Set-PCBShortcut $_.FullName '{exe}'; $n++ }}"
         "} } }; $n"
     )
     try:

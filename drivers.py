@@ -170,7 +170,7 @@ class DriverDownloader:
         if not url or not url.startswith(ALLOWED_DOWNLOAD) or vendor not in SIGNERS:
             return {"ok": False, "msg": "Indirizzo di download non valido."}
         with self._lock:
-            if self.state.get("status") in ("downloading", "installing"):
+            if self.state.get("status") in ("downloading", "installing", "launched"):
                 return {"ok": False, "msg": "Un download è già in corso."}
             self.state = {"status": "downloading", "done": 0, "total": 0, "vendor": vendor}
         threading.Thread(target=self._run, args=(url, vendor), daemon=True).start()
@@ -240,10 +240,65 @@ class DriverDownloader:
             self.state = {"status": "error", "msg": "Il file scaricato non ha la firma originale del produttore: "
                                                     "per sicurezza non l'ho aperto. Scaricalo dal sito ufficiale."}
             return
-        if IS_WINDOWS and not winutil.start([path], cwd=folder, hidden=False):
-            self.state = {"status": "error", "msg": "Non riesco ad avviare l'installazione del driver."}
+        proc = None
+        if IS_WINDOWS:
+            try:
+                import subprocess
+                proc = subprocess.Popen([path], cwd=folder, stdin=subprocess.DEVNULL, close_fds=True)
+            except OSError as e:
+                winutil._log(f"Installazione driver non avviata: {e}")
+                self.state = {"status": "error", "msg": "Non riesco ad avviare l'installazione del driver."}
+                return
+        self.state = {"status": "launched", "vendor": vendor,
+                      "msg": "Installazione in corso: segui la finestra del produttore. "
+                             "Quando finisce, questa pagina si aggiorna da sola."}
+        self._wait_installer(proc, folder, vendor)
+
+    def _wait_installer(self, proc, folder, vendor):
+        """Aspetta che l'installazione finisca davvero: il file scaricato di solito si estrae e avvia
+        un altro programma (setup.exe) che continua dopo. Si seguono tutti, poi si dice "finito"."""
+        started = time.time()
+        if proc is None:                       # modalità demo
+            time.sleep(3)
+            self.state = {"status": "finished", "vendor": vendor, "msg": "Installazione finita."}
             return
-        self.state = {"status": "launched", "msg": "Installazione avviata: segui la finestra del produttore."}
+        try:
+            import psutil
+        except ImportError:
+            psutil = None
+        roots = [os.path.normcase(folder)]
+        drive = os.environ.get("SystemDrive", "C:")
+        roots += [os.path.normcase(os.path.join(drive + "\\", d)) for d in ("NVIDIA", "AMD")]
+        watched = {proc.pid}
+        while time.time() - started < 3 * 3600:
+            alive = False
+            if psutil:
+                for pid in list(watched):
+                    try:
+                        p = psutil.Process(pid)
+                        if p.is_running() and p.status() != psutil.STATUS_ZOMBIE:
+                            alive = True
+                            watched.update(c.pid for c in p.children(recursive=True))
+                        else:
+                            watched.discard(pid)
+                    except psutil.Error:
+                        watched.discard(pid)
+                # programmi avviati dalle cartelle di installazione (anche se il primo si è già chiuso)
+                for p in psutil.process_iter(["exe"]):
+                    try:
+                        exe = os.path.normcase(p.info["exe"] or "")
+                    except psutil.Error:
+                        continue
+                    if exe and any(exe.startswith(r) for r in roots):
+                        watched.add(p.pid)
+                        alive = True
+            else:
+                alive = proc.poll() is None
+            if not alive and time.time() - started > 5:
+                break
+            time.sleep(1.5)
+        self.state = {"status": "finished", "vendor": vendor,
+                      "msg": "Installazione finita: rileggo il driver installato…"}
 
     def progress(self):
         s = dict(self.state)

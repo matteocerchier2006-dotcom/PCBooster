@@ -14,6 +14,7 @@ import threading
 
 import updater
 import winutil
+from i18n import tr
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -157,7 +158,7 @@ class Tray:
         if self.icon is None or not updater.load_settings().get("notifications", True):
             return
         try:
-            self.icon.notify(message, title)
+            self.icon.notify(tr(message), tr(title))
         except Exception:
             pass
 
@@ -209,14 +210,14 @@ class Tray:
         image = Image.open(self.icon_path)
         M = pystray.MenuItem
         menu = pystray.Menu(
-            M("Apri PC Booster", lambda *_: self.show_window(), default=True),
+            M(lambda item: tr("Apri PC Booster"), lambda *_: self.show_window(), default=True),
             pystray.Menu.SEPARATOR,
-            M(lambda item: "Termina modalità partita" if self._game_active() else "Avvia modalità partita",
+            M(lambda item: tr("Termina modalità partita" if self._game_active() else "Avvia modalità partita"),
               self.toggle_game),
-            M("Pulizia veloce", self.quick_clean),
-            M("Controlla adesso", self.check_now),
+            M(lambda item: tr("Pulizia veloce"), self.quick_clean),
+            M(lambda item: tr("Controlla adesso"), self.check_now),
             pystray.Menu.SEPARATOR,
-            M("Esci", self.quit),
+            M(lambda item: tr("Esci"), self.quit),
         )
         self.icon = pystray.Icon("PCBooster", image, "PC Booster", menu)
         self.icon.run_detached()
