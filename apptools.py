@@ -242,9 +242,15 @@ def running_apps():
     return apps[:25]
 
 
+_EXE_NAME = re.compile(r"[\w .()+\-]{1,80}\.exe", re.I)
+
+
 def _close(names):
     """Chiude con gentilezza (come la X della finestra); se dopo 3 secondi sono ancora aperte, le forza."""
     closed = []
+    # solo nomi di programmi veri (niente "*", che per taskkill vuol dire "tutti") e mai quelli protetti
+    names = [n for n in names if _EXE_NAME.fullmatch(n or "") and n.lower() not in NEVER
+             and not n.lower().startswith(NEVER_PREFIX)]
     if not IS_WINDOWS or psutil is None:
         return [{"exe": n, "path": ""} for n in names]
     paths = {}
@@ -345,8 +351,10 @@ def stop_game_mode(state, reopen=True):
     if reopen and IS_WINDOWS:
         n = 0
         for c in state.get("closed", []):
-            if c.get("path") and os.path.exists(c["path"]):
-                if winutil.start([c["path"]], cwd=os.path.dirname(c["path"]), hidden=False):
+            path = c.get("path") if isinstance(c, dict) else None
+            if path and os.path.isfile(path) and path.lower().endswith(".exe"):
+                # riaperte tramite Esplora risorse: partono come le apri tu, NON da amministratore
+                if winutil.start(["explorer", path], hidden=False):
                     n += 1
         if n:
             parts.append(f"{n} app riaperte")

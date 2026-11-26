@@ -77,6 +77,8 @@ function confirmBox(title, text, yesLabel = 'Conferma', danger = false) {
 const fmtBytes = n => { if (n == null) return '—'; const u = ['B','KB','MB','GB','TB']; let i = 0; while (n >= 1024 && i < 4) { n /= 1024; i++; } return (i < 2 ? n.toFixed(0) : n.toFixed(1)) + ' ' + u[i]; };
 const fmtMB = mb => mb >= 1024 ? (mb / 1024).toFixed(1) + ' GB' : mb ? mb + ' MB' : '—';
 const level = p => p >= 90 ? 'bad' : p >= 75 ? 'warn' : '';
+// Testo che arriva da fuori (nomi di programmi, file, reti…) messo dentro HTML: sempre "disinnescato"
+const esc = v => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const plural = (n, one, many) => I18N.tr(n === 1 ? one : many);
 function bindSeg(el, value, onPick) {
   $$('button', el).forEach(b => {
@@ -172,6 +174,7 @@ function go(view) {
   if (view === 'history') loadHistory();
   if (view === 'security') loadSecurity();
   if (view === 'disk') loadDiskHealth();
+  if (view === 'usage') loadUsage();
 }
 
 // ================= Panoramica =================
@@ -182,18 +185,39 @@ async function loadHome() {
   $('#osLine').textContent = s.os + (s.uptime ? ` · acceso da ${s.uptime}` : '');
   const specs = $('#specs'); specs.innerHTML = '';
   [['Processore', s.cpu, `${s.cores} core · ${s.threads} thread`], ['Scheda video', s.gpu, ''],
-   ['Memoria RAM', s.ram_gb + ' GB', s.ram_detail], ['Disco di sistema', `${s.disk_free_gb} GB liberi`, `su ${s.disk_total_gb} GB`]]
-    .forEach(([k, v, sm]) => { const d = h('div', 'spec'); d.append(h('span', null, k), h('b', null, v)); if (sm) d.append(h('small', null, sm)); specs.append(d); });
+   ['Memoria RAM', s.ram_gb + ' GB', s.ram_detail], ['Disco di sistema', `${s.disk_free_gb} GB liberi`, `su ${s.disk_total_gb} GB`, 'disk']]
+    .forEach(([k, v, sm, id]) => {
+      const d = h('div', 'spec'); const b = h('b', null, v); d.append(h('span', null, k), b); if (sm) d.append(h('small', null, sm));
+      if (id === 'disk') { b.id = 'mDisk'; const bar = h('i', 'specbar'), em = h('em'); em.id = 'bDisk'; bar.append(em); d.append(bar); }
+      specs.append(d);
+    });
   renderAdmin(s.admin);
   paintMeters(s);
-  setInterval(async () => { if (state.view === 'home') paintMeters(await api.get_live_stats()); }, 3000);
+  refreshSparks();
+  if (!state.homeTimer) state.homeTimer = setInterval(async () => {
+    if (state.view !== 'home' || (document.hidden || window.pcbHidden)) return;
+    paintMeters(await api.get_live_stats()); refreshSparks();
+  }, 3000);
 }
+// Riquadri della Panoramica: valore di adesso + mini grafico degli ultimi 2 minuti
+async function refreshSparks() {
+  const u = await api.get_usage(120);
+  if (!u || !u.t) return;
+  const last = k => { const v = (u[k] || []).filter(x => x != null); return v.length ? v[v.length - 1] : null; };
+  Charts.spark($('#sCpu'), u.cpu, 100);
+  Charts.spark($('#sRam'), u.ram, 100);
+  const gpuOk = u.gpu_available !== false;
+  $('#tileGpu').hidden = !gpuOk; $('.meters').classList.toggle('no-gpu', !gpuOk);
+  if (gpuOk) { Charts.spark($('#sGpu'), u.gpu, 100); const g = last('gpu'); $('#mGpu').textContent = g == null ? '–' : Math.round(g) + '%'; }
+  const c = last('cpu'); if (c != null) $('#mCpu').textContent = Math.round(c) + '%';
+}
+$$('.meter.spark').forEach(b => b.addEventListener('click', () => go('usage')));
 function paintMeters(s) {
   const diskUsed = s.disk_total_gb ? Math.round(100 - s.disk_free_gb / s.disk_total_gb * 100) : 0;
-  [['Cpu', s.cpu_load, s.cpu_load + '%'], ['Ram', s.ram_used, s.ram_used_gb ? `${s.ram_used_gb} GB · ${s.ram_used}%` : s.ram_used + '%'],
+  [['Cpu', s.cpu_load, s.cpu_load + '%'], ['Ram', s.ram_used, s.ram_used + '%'],
    ['Disk', diskUsed, `${s.disk_free_gb} GB liberi`]].forEach(([k, p, label]) => {
-    $('#m' + k).textContent = label;
-    const bar = $('#b' + k); bar.style.width = p + '%'; bar.className = level(p);
+    const el = $('#m' + k); if (el) el.textContent = label;
+    const bar = $('#b' + k); if (bar) { bar.style.width = p + '%'; bar.className = level(p); }
   });
 }
 function renderAdmin(isAdmin) {
@@ -207,9 +231,10 @@ function setScore(score) {
   const el = $('#score');
   el.classList.remove('ok', 'warn', 'bad');
   if (score == null) { $('#scoreNum').textContent = '?'; $('#scoreLabel').textContent = 'Non analizzato'; $('#scoreArc').style.strokeDashoffset = 326.7; return; }
-  el.classList.add(score >= 80 ? 'ok' : score >= 55 ? 'warn' : 'bad');
+  el.classList.add(score >= 80 ? 'ok' : score >= 45 ? 'warn' : 'bad');
   $('#scoreNum').textContent = score;
-  $('#scoreLabel').textContent = score >= 90 ? 'Ottimo' : score >= 80 ? 'Buono' : score >= 55 ? 'Da sistemare' : 'Serve una pulizia';
+  // etichette corte: devono stare dentro il cerchio
+  $('#scoreLabel').textContent = score >= 90 ? 'Ottimo' : score >= 80 ? 'Buono' : score >= 60 ? 'Discreto' : 'Da sistemare';
   $('#scoreArc').style.strokeDashoffset = 326.7 * (1 - score / 100);
 }
 
@@ -242,36 +267,36 @@ async function runCheckup() {
       const main = gpus.find(g => (g.vendor === 'nvidia' || g.vendor === 'amd') && (g.kind === 'Dedicata' || gpus.length === 1));
       const dr = main ? await checkDriver(main, true) : null;
       const old = gpus.filter(g => g.status === 'warn' && g.kind === 'Dedicata');
-      if (dr && dr.ok && dr.update) { penalty += 10; fillFinding(steps.gpu, 'warn', `Nuovo driver per ${main.name}: ${dr.version}`, `Tu hai il ${dr.installed}. I driver nuovi migliorano le prestazioni nei giochi recenti.`, 'Installa', () => go('gpu')); }
+      if (dr && dr.ok && dr.update) { penalty += 6; fillFinding(steps.gpu, 'warn', `Nuovo driver per ${main.name}: ${dr.version}`, `Tu hai il ${dr.installed}. I driver nuovi migliorano le prestazioni nei giochi recenti.`, 'Installa', () => go('gpu')); }
       else if (dr && dr.ok && !dr.unknown_installed) fillFinding(steps.gpu, 'ok', 'Hai l\'ultimo driver della scheda video', `${main.name} · ${dr.version}`);
-      else if (old.length) { penalty += 10; fillFinding(steps.gpu, 'warn', `Driver di ${old[0].name} di ${old[0].age_days} giorni fa`, 'Probabilmente ne è uscito uno più nuovo, con miglioramenti per i giochi recenti.', 'Vai al driver', () => go('gpu')); }
+      else if (old.length) { penalty += 6; fillFinding(steps.gpu, 'warn', `Driver di ${old[0].name} di ${old[0].age_days} giorni fa`, 'Probabilmente ne è uscito uno più nuovo, con miglioramenti per i giochi recenti.', 'Vai al driver', () => go('gpu')); }
       else fillFinding(steps.gpu, 'ok', 'Driver della scheda video recente', gpus.filter(g => g.kind === 'Dedicata').map(g => `${g.name} · ${g.driver_version}`).join(', ') || gpus.map(g => g.name).join(', '));
     }),
     run('junk', async () => {
       const junk = await api.scan_junk(); state.junk = junk; renderJunk();
       const total = junk.items.filter(i => i.default).reduce((a, j) => a + (j.bytes || 0), 0);
-      if (total > 1024 ** 3) { penalty += 15; fillFinding(steps.junk, 'warn', `${fmtBytes(total)} di file inutili`, 'Temporanei, cache e vecchi aggiornamenti che puoi eliminare senza rischi.', 'Pulisci', () => go('clean')); }
-      else if (total > 300 * 1024 ** 2) { penalty += 6; fillFinding(steps.junk, 'warn', `${fmtBytes(total)} di file inutili`, 'Una pulizia veloce libera un po\' di spazio.', 'Pulisci', () => go('clean')); }
+      if (total > 1024 ** 3) { penalty += total > 5 * 1024 ** 3 ? 10 : 7; fillFinding(steps.junk, 'warn', `${fmtBytes(total)} di file inutili`, 'Temporanei, cache e vecchi aggiornamenti che puoi eliminare senza rischi.', 'Pulisci', () => go('clean')); }
+      else if (total > 300 * 1024 ** 2) { penalty += 3; fillFinding(steps.junk, 'warn', `${fmtBytes(total)} di file inutili`, 'Una pulizia veloce libera un po\' di spazio.', 'Pulisci', () => go('clean')); }
       else fillFinding(steps.junk, 'ok', 'Il PC è pulito', `Solo ${fmtBytes(total)} di file temporanei.`);
     }),
     run('tw', async () => {
       const tw = await api.get_gpu_tweaks();
-      const missing = [['game_mode', true, 'Modalità Gioco'], ['hags', true, 'pianificazione GPU'], ['high_perf', true, 'Prestazioni elevate'], ['game_dvr', false, 'registrazione in background spenta'], ['windowed_opt', true, 'giochi in finestra']]
+      const missing = [['game_mode', true, 'Modalità Gioco'], ['hags', true, 'pianificazione GPU'], ['high_perf', true, 'Prestazioni elevate'], ['game_dvr', false, 'registrazioni di Game Bar spente'], ['windowed_opt', true, 'giochi in finestra']]
         .filter(([k, want]) => tw[k] !== null && tw[k] !== undefined && !!tw[k] !== want).map(x => x[2]);
-      if (missing.length) { penalty += missing.length * 3; fillFinding(steps.tw, 'warn', `${missing.length} ${plural(missing.length, 'ottimizzazione', 'ottimizzazioni')} per i giochi non ${plural(missing.length, 'attiva', 'attive')}`, 'Mancano: ' + missing.join(', ') + '.', 'Ottimizza', () => $('#optimizeBtn').click()); }
+      if (missing.length) { penalty += Math.min(6, missing.length * 2); fillFinding(steps.tw, 'warn', `${missing.length} ${plural(missing.length, 'ottimizzazione', 'ottimizzazioni')} per i giochi non ${plural(missing.length, 'attiva', 'attive')}`, 'Mancano: ' + missing.join(', ') + '.', 'Ottimizza', () => $('#optimizeBtn').click()); }
       else fillFinding(steps.tw, 'ok', 'Impostazioni per i giochi a posto', 'Tutte le ottimizzazioni sono attive.');
     }),
     run('st', async () => {
       const st = await api.list_startup(); state.startup = st;
       const heavy = st.filter(x => x.enabled && x.suggest === 'off');
-      if (heavy.length) { penalty += Math.min(10, heavy.length * 2); fillFinding(steps.st, 'warn', `${heavy.length} ${plural(heavy.length, 'programma parte', 'programmi partono')} da soli all'accensione`, heavy.slice(0, 4).map(x => x.name).join(', ') + (heavy.length > 4 ? '…' : ''), 'Disattiva', () => go('startup')); }
+      if (heavy.length) { penalty += Math.min(6, heavy.length * 2); fillFinding(steps.st, 'warn', `${heavy.length} ${plural(heavy.length, 'programma parte', 'programmi partono')} da soli all'accensione`, heavy.slice(0, 4).map(x => x.name).join(', ') + (heavy.length > 4 ? '…' : ''), 'Disattiva', () => go('startup')); }
       else fillFinding(steps.st, 'ok', 'Avvio leggero', 'Nessun programma inutile parte con Windows.');
     }),
     run('space', async () => {
       const s = state.system || await api.get_system_info();
       const free = s.disk_total_gb ? s.disk_free_gb / s.disk_total_gb : 1;
       if (free < 0.1) { penalty += 20; fillFinding(steps.space, 'bad', `Disco di sistema quasi pieno (${s.disk_free_gb} GB liberi)`, 'Windows rallenta quando il disco è pieno. Cerca i file grandi o disinstalla qualche gioco.', 'Libera spazio', () => go('disk')); }
-      else if (free < 0.2) { penalty += 8; fillFinding(steps.space, 'warn', `Poco spazio sul disco di sistema (${s.disk_free_gb} GB liberi)`, 'Conviene liberare un po\' di spazio.', 'Libera spazio', () => go('disk')); }
+      else if (free < 0.2) { penalty += 6; fillFinding(steps.space, 'warn', `Poco spazio sul disco di sistema (${s.disk_free_gb} GB liberi)`, 'Conviene liberare un po\' di spazio.', 'Libera spazio', () => go('disk')); }
       else fillFinding(steps.space, 'ok', 'Spazio sul disco a posto', `${s.disk_free_gb} GB liberi su ${s.disk_total_gb} GB.`);
     }),
     run('sec', async () => {
@@ -280,10 +305,10 @@ async function runCheckup() {
       if (sec.ok || sec.other_av) {
         const avOn = sec.realtime || (sec.other_av || []).some(a => a.on);
         const fwOff = (sec.firewall || []).filter(f => !f.on).length;
-        if (thr.length) { penalty += 25; fillFinding(steps.sec, 'bad', `${thr.length} ${plural(thr.length, 'minaccia trovata', 'minacce trovate')}`, thr.map(t => t.name).slice(0, 2).join(', '), 'Rimuovi', () => go('security')); }
-        else if (!avOn) { penalty += 20; fillFinding(steps.sec, 'bad', 'La protezione antivirus è spenta', 'Il PC non è protetto dai virus in questo momento.', 'Attiva', () => go('security')); }
-        else if (fwOff) { penalty += 10; fillFinding(steps.sec, 'bad', 'Il firewall è spento', 'Il firewall blocca gli accessi indesiderati da internet.', 'Attiva', () => go('security')); }
-        else if (sec.realtime && sec.sig_age_days > 3) { penalty += 5; fillFinding(steps.sec, 'warn', `Definizioni dei virus vecchie di ${sec.sig_age_days} giorni`, 'Aggiornale per riconoscere i virus più nuovi.', 'Aggiorna', () => go('security')); }
+        if (thr.length) { penalty += 30; fillFinding(steps.sec, 'bad', `${thr.length} ${plural(thr.length, 'minaccia trovata', 'minacce trovate')}`, thr.map(t => t.name).slice(0, 2).join(', '), 'Rimuovi', () => go('security')); }
+        else if (!avOn) { penalty += 25; fillFinding(steps.sec, 'bad', 'La protezione antivirus è spenta', 'Il PC non è protetto dai virus in questo momento.', 'Attiva', () => go('security')); }
+        else if (fwOff) { penalty += 12; fillFinding(steps.sec, 'bad', 'Il firewall è spento', 'Il firewall blocca gli accessi indesiderati da internet.', 'Attiva', () => go('security')); }
+        else if (sec.realtime && sec.sig_age_days > 3) { penalty += 4; fillFinding(steps.sec, 'warn', `Definizioni dei virus vecchie di ${sec.sig_age_days} giorni`, 'Aggiornale per riconoscere i virus più nuovi.', 'Aggiorna', () => go('security')); }
         else fillFinding(steps.sec, 'ok', 'Il PC è protetto', sec.realtime ? 'Microsoft Defender attivo, definizioni aggiornate, firewall acceso.' : `Antivirus attivo: ${(sec.other_av || []).filter(a => a.on).map(a => a.name).join(', ')}.`);
       } else fillFinding(steps.sec, 'warn', 'Non riesco a leggere lo stato dell\'antivirus', sec.msg || '');
       setSecDot(sec, thr);
@@ -292,7 +317,7 @@ async function runCheckup() {
       const disks = await api.disk_health(); state.disks = disks;
       const badDisk = disks.find(d => d.status === 'bad'), warnDisk = disks.find(d => d.status === 'warn');
       if (badDisk) { penalty += 20; fillFinding(steps.dh, 'bad', `Il disco ${badDisk.name} ha un problema`, badDisk.note, 'Vedi', () => go('disk')); }
-      else if (warnDisk) { penalty += 8; fillFinding(steps.dh, 'warn', `Attenzione al disco ${warnDisk.name}`, warnDisk.note, 'Vedi', () => go('disk')); }
+      else if (warnDisk) { penalty += 6; fillFinding(steps.dh, 'warn', `Attenzione al disco ${warnDisk.name}`, warnDisk.note, 'Vedi', () => go('disk')); }
       else fillFinding(steps.dh, 'ok', 'Dischi in salute', disks.map(d => `${d.name}${d.life != null ? ` · vita ${d.life}%` : ''}`).join(', '));
     }),
     run('upd', async () => {
@@ -300,14 +325,14 @@ async function runCheckup() {
       if (!r.ok) return fillFinding(steps.upd, 'bad', 'Windows Update non ha risposto', r.msg);
       state.updates = r.updates; renderUpdates();
       const drv = r.updates.filter(u => u.category !== 'system').length;
-      if (r.updates.length) { penalty += 8 + drv * 3; fillFinding(steps.upd, 'warn', `${r.updates.length} ${plural(r.updates.length, 'aggiornamento disponibile', 'aggiornamenti disponibili')}` + (drv ? `, di cui ${drv} driver` : ''), r.updates.slice(0, 2).map(u => u.title).join(' — '), 'Installa', () => go('updates')); }
+      if (r.updates.length) { penalty += Math.min(8, 4 + drv * 2); fillFinding(steps.upd, 'warn', `${r.updates.length} ${plural(r.updates.length, 'aggiornamento disponibile', 'aggiornamenti disponibili')}` + (drv ? `, di cui ${drv} driver` : ''), r.updates.slice(0, 2).map(u => u.title).join(' — '), 'Installa', () => go('updates')); }
       else fillFinding(steps.upd, 'ok', 'Windows e i driver sono aggiornati', 'Nessun aggiornamento in sospeso.');
     }),
     run('wg', async () => {
       const wg = await api.list_app_updates();
       if (!wg.ok) return fillFinding(steps.wg, 'warn', 'Non riesco a controllare i programmi', wg.msg);
       state.wg = wg.apps; renderWinget();
-      if (wg.apps.length) { penalty += Math.min(10, wg.apps.length * 2); fillFinding(steps.wg, 'warn', `${wg.apps.length} ${plural(wg.apps.length, 'programma da aggiornare', 'programmi da aggiornare')}`, wg.apps.slice(0, 4).map(a => a.name).join(', ') + (wg.apps.length > 4 ? '…' : ''), 'Aggiorna', () => go('updates')); }
+      if (wg.apps.length) { penalty += Math.min(5, wg.apps.length); fillFinding(steps.wg, 'warn', `${wg.apps.length} ${plural(wg.apps.length, 'programma da aggiornare', 'programmi da aggiornare')}`, wg.apps.slice(0, 4).map(a => a.name).join(', ') + (wg.apps.length > 4 ? '…' : ''), 'Aggiorna', () => go('updates')); }
       else fillFinding(steps.wg, 'ok', 'Tutti i programmi sono aggiornati', 'Nessuna versione nuova da installare.');
     }),
   ]);
@@ -315,7 +340,7 @@ async function runCheckup() {
   const order = { bad: 0, warn: 1, ok: 2, pending: 3 };
   [...list.children].sort((x, y) => order[x.className.split(' ')[1]] - order[y.className.split(' ')[1]]).forEach(li => list.append(li));
   setScore(Math.max(0, Math.min(100, 100 - penalty)));
-  toast(`Analisi finita in ${Math.round((performance.now() - t0) / 1000)} secondi.`);
+  { const sec = Math.round((performance.now() - t0) / 1000); toast(sec < 1 ? 'Analisi finita in meno di un secondo.' : `Analisi finita in ${sec} secondi.`); };
 }
 function addFinding(lvl, title, text, action, fn) {
   const li = h('li', 'finding ' + lvl); $('#findingsList').append(li); fillFinding(li, lvl, title, text, action, fn); return li;
@@ -331,7 +356,7 @@ $('#optimizeBtn').addEventListener('click', async e => {
   const btn = e.currentTarget;
   const rp = state.prefs.restore_before_optimize !== false;
   const ok = await confirmBox('Ottimizzare il PC per i giochi?',
-    (rp ? 'Prima creo un punto di ripristino, poi ' : '') + 'attivo Modalità Gioco, pianificazione GPU, Prestazioni elevate e le ottimizzazioni per i giochi in finestra, spengo la registrazione in background e tolgo dall\'avvio i programmi non necessari. Puoi annullare tutto dalle sezioni Scheda video e Avvio automatico.', 'Ottimizza');
+    (rp ? 'Prima creo un punto di ripristino, poi ' : '') + 'attivo Modalità Gioco, pianificazione GPU, Prestazioni elevate e le ottimizzazioni per i giochi in finestra, spengo le registrazioni di Game Bar e tolgo dall\'avvio i programmi non necessari. Puoi annullare tutto dalle sezioni Scheda video e Avvio automatico.', 'Ottimizza');
   if (!ok) return;
   busy(btn, async () => {
     const r1 = await api.optimize_all(rp);
@@ -487,8 +512,8 @@ function renderGpu() {
     const c = h('div', 'gpu');
     const head = h('div', 'gpu-head'); head.append(h('h3', null, g.name), h('span', 'tag ' + (g.kind === 'Dedicata' ? 'acc' : 'muted'), g.kind));
     const det = h('div', 'details');
-    const cell = (k, v, sm) => { const d = h('div'); d.append(h('span', null, k), h('b', null, v || 'n.d.')); if (sm) d.append(h('small', null, sm)); det.append(d); };
-    cell('Versione driver', g.driver_version, g.driver_raw && g.driver_raw !== g.driver_version ? 'Windows: ' + g.driver_raw : '');
+    const cell = (k, v, sm, mono) => { const d = h('div'); d.append(h('span', null, k), h('b', null, v || 'n.d.')); if (sm) d.append(h('small', mono ? 'mono' : null, sm)); det.append(d); };
+    cell('Versione driver', g.driver_version, g.driver_raw && g.driver_raw !== g.driver_version ? 'Windows: ' + g.driver_raw : '', true);
     cell('Data del driver', g.driver_date ? new Date(g.driver_date).toLocaleDateString(I18N.locale(), { day: 'numeric', month: 'long', year: 'numeric' }) : '', g.age_days != null ? `${g.age_days} giorni fa` : '');
     cell('Memoria video', g.vram);
     if (g.display) cell('Schermo', g.display);
@@ -596,6 +621,7 @@ function startGpuLive() {
   if (!state.gpus || !state.gpus.some(g => g.live)) return;
   const tick = async () => {
     if (state.view !== 'gpu') return clearInterval(gpuTimer);
+    if (window.pcbHidden) return;
     const box = $('#gpuLive'); if (!box) return;
     const d = await api.get_gpu_live(); if (!d.ok) return;
     box.innerHTML = '';
@@ -674,6 +700,9 @@ function renderStartup() {
     else tag = h('span');
     const cb = h('input'); cb.type = 'checkbox'; cb.checked = it.enabled; cb.style.position = 'absolute'; cb.style.opacity = 0;
     cb.addEventListener('change', async () => {
+      // programmi di sistema, driver, sicurezza: prima di spegnerli si chiede conferma
+      if (!cb.checked && it.suggest === 'keep' && !await confirmBox(`Togliere ${it.name} dall'avvio?`,
+        'Sembra un programma di Windows, di un driver o della sicurezza: senza di lui qualcosa potrebbe non funzionare (audio, touchpad, protezione). Puoi riattivarlo da qui o dalla Cronologia.', 'Togli lo stesso', true)) { cb.checked = true; return; }
       const r = await api.set_startup(it.id, cb.checked); toast(r.msg, r.ok);
       if (r.ok) it.enabled = cb.checked; renderStartup();
     });
@@ -697,6 +726,8 @@ function renderApps() {
   const list = $('#appList'); list.innerHTML = '';
   const shown = state.apps.filter(a => (state.appFilter === 'all' || (state.appFilter === 'games') === a.game) &&
     (!q || a.name.toLowerCase().includes(q) || (a.publisher || '').toLowerCase().includes(q)));
+  const tot = shown.reduce((x, a) => x + (a.size_mb || 0), 0);
+  $('#appSum').textContent = shown.length ? `${shown.length} ${plural(shown.length, 'elemento', 'elementi')} · ${fmtMB(tot)}` : '';
   if (!shown.length) { list.append(h('p', 'empty', q ? `Niente che corrisponda a "${q}".` : 'Nessun elemento.')); return; }
   shown.forEach(a => {
     const row = h('div', 'lrow' + (a.game ? ' game' : ''));
@@ -895,14 +926,14 @@ function renderSecHero(st, th) {
     if (btnText) { const b = h('button', 'btn small', btnText); b.onclick = () => busy(b, fn); r.append(b); } else r.append(h('i'));
     checks.append(r);
   };
-  if (other.length && !st.realtime) row('ok', `<b>Antivirus:</b> ${other.map(a => a.name).join(', ')}. Defender fa i controlli che chiedi tu.`);
+  if (other.length && !st.realtime) row('ok', `<b>Antivirus:</b> ${esc(other.map(a => a.name).join(', '))}. Defender fa i controlli che chiedi tu.`);
   else row(st.realtime ? 'ok' : 'bad', st.realtime ? '<b>Microsoft Defender</b> attivo, con protezione in tempo reale.' : '<b>Protezione in tempo reale spenta.</b>',
     st.realtime ? null : 'Attiva', async () => { const r = await api.security_realtime(); toast(r.msg, r.ok); loadSecurity(); });
-  if (st.sig_age_days != null) row(st.sig_age_days > 3 ? 'warn' : 'ok', `<b>Definizioni dei virus:</b> ${st.sig_age_days === 0 ? 'aggiornate oggi' : `di ${st.sig_age_days} ${plural(st.sig_age_days, 'giorno', 'giorni')} fa`}${st.sig_updated ? ` (${st.sig_updated})` : ''}.`,
+  if (st.sig_age_days != null) row(st.sig_age_days > 3 ? 'warn' : 'ok', `<b>Definizioni dei virus:</b> ${st.sig_age_days === 0 ? 'aggiornate oggi' : `di ${+st.sig_age_days} ${plural(st.sig_age_days, 'giorno', 'giorni')} fa`}${st.sig_updated ? ` (${esc(st.sig_updated)})` : ''}.`,
     st.sig_age_days > 3 ? 'Aggiorna' : null, updateDefs);
   const q = st.quick_age_days;
   row(q == null || q > 14 ? 'warn' : 'ok', `<b>Ultimo controllo:</b> ${q == null ? 'mai fatto' : q === 0 ? 'oggi' : `${q} ${plural(q, 'giorno', 'giorni')} fa`}.`, q == null || q > 14 ? 'Controlla ora' : null, () => startScan('quick'));
-  row(fwOff.length ? 'bad' : 'ok', fwOff.length ? `<b>Firewall spento</b> sulle reti: ${fwOff.map(f => f.name).join(', ')}.` : '<b>Firewall</b> attivo su tutte le reti.',
+  row(fwOff.length ? 'bad' : 'ok', fwOff.length ? `<b>Firewall spento</b> sulle reti: ${esc(fwOff.map(f => f.name).join(', '))}.` : '<b>Firewall</b> attivo su tutte le reti.',
     fwOff.length ? 'Attiva' : null, async () => { const r = await api.security_firewall(); toast(r.msg, r.ok); loadSecurity(); });
   if (active.length) row('bad', `<b>${active.length} ${plural(active.length, 'minaccia attiva', 'minacce attive')}</b>: rimuovile qui sotto.`);
   right.append(checks);
@@ -1141,9 +1172,11 @@ const KIND_NAME = { optimize: 'Ottimizzazione', startup: 'Avvio automatico', cle
 async function loadHistory() {
   const items = await api.history_list();
   const box = $('#histList'); box.innerHTML = '';
+  $('#histClear').hidden = !items.length;
   if (!items.length) { box.append(h('p', 'empty', 'Nessuna modifica per ora. Qui vedrai tutto quello che PC Booster cambia sul PC.')); return; }
   let day = null, list = null;
-  const today = new Date().toISOString().slice(0, 10);
+  // data di oggi nell'ora del PC (non in quella di Greenwich: dopo mezzanotte sbagliava giorno)
+  const n = new Date(), today = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-${String(n.getDate()).padStart(2, '0')}`;
   items.forEach(e => {
     const d = e.when.slice(0, 10);
     if (d !== day) {
@@ -1175,3 +1208,114 @@ $('#issueBtn').addEventListener('click', e => busy(e.currentTarget, async () => 
   if (r.ok) { await api.open_issue(); toast('Si apre GitHub: descrivi il problema e trascina il file del report che trovi sul desktop.'); }
   else toast(r.msg, false);
 }));
+
+// ================= Utilizzo: grafici =================
+const USAGE = [
+  { id: 'cpu', title: 'Processore', unit: '%', max: 100, series: [['cpu', 'Processore']] },
+  { id: 'ram', title: 'Memoria RAM', unit: '%', max: 100, series: [['ram', 'Memoria RAM']] },
+  { id: 'gpu', title: 'Scheda video', unit: '%', max: 100, series: [['gpu', 'Scheda video']] },
+  { id: 'disk', title: 'Disco', unit: 'MB/s', max: null, series: [['disk_r', 'Lettura'], ['disk_w', 'Scrittura']] },
+  { id: 'net', title: 'Rete', unit: 'Mbps', max: null, series: [['net_d', 'Download'], ['net_u', 'Upload']], wide: true },
+];
+state.usageRange = 300;
+let usageTimer, procTimer;
+const fmtNum = v => v >= 100 ? Math.round(v).toString() : v >= 10 ? v.toFixed(1) : v.toFixed(v >= 1 ? 1 : 2);
+function buildUsage() {
+  const box = $('#usageCharts');
+  if (box.children.length) return;
+  USAGE.forEach(c => {
+    const card = h('div', 'chart' + (c.wide ? ' wide' : '')); card.id = 'ch-' + c.id;
+    const head = h('div', 'chart-head'); const now = h('b'); now.id = 'chNow-' + c.id;
+    head.append(h('h3', null, c.title), now);
+    const plot = h('div', 'plot'); const cv = document.createElement('canvas'); cv.id = 'cv-' + c.id;
+    cv.setAttribute('aria-label', c.title);
+    const tip = h('div', 'ctip'); tip.hidden = true; plot.append(cv, tip);
+    card.append(head, plot);
+    if (c.series.length > 1) {          // due serie: legenda sempre visibile
+      const lg = h('div', 'clegend');
+      c.series.forEach(([, name], i) => { const sp = h('span'); const k = h('i'); k.style.background = `var(--series-${i + 1})`; sp.append(k, document.createTextNode(I18N.tr(name))); lg.append(sp); });
+      card.append(lg);
+    }
+    const st = h('div', 'cstats'); st.id = 'chStats-' + c.id; card.append(st);
+    box.append(card);
+    Charts.hover(cv, tip);
+  });
+}
+function drawUsage(u) {
+  const css = n => getComputedStyle(root).getPropertyValue(n).trim();
+  USAGE.forEach(c => {
+    const card = $('#ch-' + c.id);
+    if (c.id === 'gpu') { card.hidden = u.gpu_available === false; if (card.hidden) return; }
+    const series = c.series.map(([k, name], i) => ({ name: I18N.tr(name), values: u[k] || [],
+      color: c.series.length === 1 ? css('--accent') : css(`--series-${i + 1}`) }));
+    const fmt = (v, axis) => axis ? (c.unit === '%' ? Math.round(v) + '%' : (v ? fmtNum(v) : '0'))
+      : (c.unit === '%' ? v.toFixed(1) + '%' : fmtNum(v) + ' ' + c.unit);
+    const cv = $('#cv-' + c.id);
+    const has = series.some(s => s.values.some(v => v != null));
+    const plot = cv.parentNode;
+    let empty = $('.cempty', plot);
+    if (!has) {
+      if (!empty) { empty = h('div', 'cempty', 'Raccolgo i dati… il grafico si riempie in pochi secondi.'); plot.append(empty); }
+      cv.hidden = true;
+    } else { if (empty) empty.remove(); cv.hidden = false; }
+    Charts.line(cv, { t: u.t, now: u.now, range: u.seconds, interval: u.interval, series, max: c.max, fmt });
+    // numeri sempre scritti (non solo nel riquadro col mouse): adesso, media, massimo
+    const stats = $('#chStats-' + c.id); stats.innerHTML = '';
+    const rows = series.map(s => { const v = s.values.filter(x => x != null); return { s, v }; }).filter(r => r.v.length);
+    if (rows.length) {
+      const tbl = h('table', 'ctable' + (series.length > 1 ? ' two' : ''));
+      const two = series.length > 1;
+      const hr = h('tr'); if (two) hr.append(h('th')); hr.append(h('th', null, 'Adesso'), h('th', null, 'In media'), h('th', null, 'Massimo'));
+      const thead = h('thead'); thead.append(hr); tbl.append(thead);
+      const tb = h('tbody');
+      rows.forEach(({ s, v }) => {
+        const tr = h('tr');
+        if (two) tr.append(h('td', null, s.name));
+        const avg = v.reduce((a, b) => a + b, 0) / v.length;
+        tr.append(h('td', null, fmt(v[v.length - 1])), h('td', null, fmt(avg)), h('td', null, fmt(Math.max(...v))));
+        tb.append(tr);
+      });
+      tbl.append(tb); stats.append(tbl);
+    }
+    const now = $('#chNow-' + c.id); now.textContent = '';
+    // in alto: il valore di adesso (per il disco lettura + scrittura, per la rete il download)
+    const lastOf = s => { const v = s.values.filter(x => x != null); return v.length ? v[v.length - 1] : null; };
+    const val = c.id === 'disk' ? (series.every(s => lastOf(s) == null) ? null : series.reduce((a, s) => a + (lastOf(s) || 0), 0)) : lastOf(series[0]);
+    if (val != null) {
+      if (c.unit === '%') now.textContent = Math.round(val) + '%';
+      else { now.textContent = fmtNum(val); now.append(h('small', null, c.unit)); }
+    }
+  });
+}
+async function refreshUsage() {
+  if (state.view !== 'usage' || (document.hidden || window.pcbHidden)) return;
+  const u = await api.get_usage(state.usageRange);
+  if (u && u.t) drawUsage(u);
+}
+async function refreshProcs() {
+  if (state.view !== 'usage' || (document.hidden || window.pcbHidden)) return;
+  const r = await api.top_processes();
+  if (!r || !r.cpu) return;
+  const paint = (box, rows, kind) => {
+    box.innerHTML = '';
+    if (!rows.length) { box.append(h('p', 'empty', 'Misuro…')); return; }
+    const top = Math.max(1, ...rows.map(x => kind === 'cpu' ? x.cpu : x.mem_mb));
+    rows.forEach(x => {
+      const row = h('div', 'prow');
+      const nm = h('span', 'pname', x.name.replace(/\.exe$/i, '')); if (x.count > 1) nm.append(h('small', null, `×${x.count}`));
+      const bar = h('span', 'pbar'), em = h('em'); em.style.width = Math.round((kind === 'cpu' ? x.cpu : x.mem_mb) / top * 100) + '%'; bar.append(em);
+      const val = h('span', 'pval', kind === 'cpu' ? `${x.cpu.toFixed(1)}%` : (x.mem_mb >= 1024 ? `${(x.mem_mb / 1024).toFixed(1)} GB` : `${x.mem_mb} MB`));
+      row.append(nm, bar, val); box.append(row);
+    });
+  };
+  paint($('#procCpu'), r.cpu, 'cpu'); paint($('#procMem'), r.mem, 'mem');
+}
+function loadUsage() {
+  buildUsage();
+  refreshUsage(); refreshProcs();
+  clearInterval(usageTimer); clearInterval(procTimer);
+  usageTimer = setInterval(refreshUsage, 2000);
+  procTimer = setInterval(refreshProcs, 3000);
+}
+bindSeg($('#usageRange'), '300', v => { state.usageRange = +v; refreshUsage(); });
+window.addEventListener('resize', () => { if (state.view === 'usage') refreshUsage(); else if (state.view === 'home') refreshSparks(); });

@@ -5,7 +5,8 @@ App per Windows 10/11 che tiene in forma il PC: driver della scheda video, aggio
 ## Cosa fa
 
 - **Modalità partita**: prima di giocare attiva Prestazioni elevate, libera la RAM e chiude le app scelte; alla fine rimette tutto com'era.
-- **Panoramica**: voto da 0 a 100 sullo stato del PC, specifiche, uso di CPU, RAM e disco, e la lista di cosa sistemare.
+- **Panoramica**: voto da 0 a 100 sullo stato del PC, specifiche, uso di CPU, RAM, scheda video e disco con mini grafici, e la lista di cosa sistemare.
+- **Utilizzo**: grafici dell'ultima ora per processore, RAM, scheda video, disco e rete, e i programmi che stanno usando di più il PC.
 - **Pulizia**: temporanei, Windows Update, report e dump di errore, log, cache di Chrome/Edge/Brave/Firefox/Zen/Opera/Vivaldi, Discord, Spotify, Steam, Epic, cache shader e pulizia profonda (componenti di Windows, Windows.old).
 - **Dischi**: spazio libero, Libera spazio, salute di SSD e hard disk (stato, vita residua, temperatura, ore di accensione), ottimizzazione delle unità (TRIM / deframmentazione) e ricerca dei file grandi.
 - **Sicurezza**: Microsoft Defender (controllo veloce, completo e offline, definizioni, minacce e rimozione) e firewall.
@@ -53,6 +54,7 @@ GitHub crea da solo `PCBooster.exe` ogni volta che pubblichi una nuova release. 
 - `history.py`: cronologia e Annulla
 - `diagnostics.py`: registro degli errori e report dei problemi
 - `i18n.py`, `ui/i18n.js`, `ui/lang-en.js`: lingue (il dizionario inglese è in `ui/lang-en.js`)
+- `monitor.py`: dati per i grafici dell'utilizzo (`ui/charts.js` li disegna)
 - `winutil.py`: comandi di Windows (PowerShell, schtasks…) con tempo massimo e salvataggi sicuri
 - `ui/`: interfaccia (HTML, CSS, JavaScript)
 - `.github/workflows/pubblica.yml`: istruzioni per GitHub su come creare l'exe

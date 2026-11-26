@@ -21,6 +21,7 @@ import history
 import network
 import diagnostics
 import winutil
+import monitor
 
 IS_WINDOWS = sys.platform == "win32"
 WIN11 = IS_WINDOWS and sys.getwindowsversion().build >= 22000
@@ -244,8 +245,9 @@ class Api:
         drive = os.environ.get("SystemDrive", "C:") + "\\" if IS_WINDOWS else "/"
         disk = psutil.disk_usage(drive)
         vm = psutil.virtual_memory()
+        cpu = monitor.MONITOR.latest("cpu")      # già misurato dai grafici: niente attesa
         return {
-            "cpu_load": round(psutil.cpu_percent(interval=0.4)),
+            "cpu_load": round(cpu if cpu is not None else psutil.cpu_percent(interval=0.4)),
             "ram_used": round(vm.percent), "ram_used_gb": round(vm.used / 1024 ** 3, 1),
             "disk_free_gb": round(disk.free / 1024 ** 3), "disk_total_gb": round(disk.total / 1024 ** 3),
         }
@@ -558,8 +560,11 @@ class Api:
                     if item:
                         item["enabled"] = u["enabled"]
                 else:
+                    if u.get("root") not in ("HKLM", "HKCU") or u.get("approved") not in ("Run", "Run32", "StartupFolder") \
+                            or not isinstance(u.get("value"), str):
+                        return {"ok": False, "msg": "Questa modifica non si può annullare."}
                     root = winreg.HKEY_LOCAL_MACHINE if u["root"] == "HKLM" else winreg.HKEY_CURRENT_USER
-                    self._write_startup(root, u["approved"], u["value"], u["enabled"])
+                    self._write_startup(root, u["approved"], u["value"], bool(u["enabled"]))
                     self._startup_cache = []
                 r = {"ok": True, "msg": f"{u['name']} " + ("di nuovo all'avvio." if u["enabled"] else "tolto dall'avvio.")}
             elif t == "dns":
@@ -614,13 +619,18 @@ class Api:
                         "power": int(float(d[4])) if d[4] not in ("[N/A]", "") else None}
             except (ValueError, IndexError):
                 pass
-        out = run_ps("((Get-Counter '\\GPU Engine(*engtype_3D)\\Utilization Percentage' -ErrorAction SilentlyContinue)"
-                     ".CounterSamples | Measure-Object CookedValue -Sum).Sum", 15)
-        try:
-            return {"ok": True, "temp": None, "load": min(100, round(float(out or 0))), "mem_used": None,
-                    "mem_total": None, "power": None}
-        except ValueError:
+        # altre schede (AMD, Intel): utilizzo dai contatori di Windows (nomi inglesi: vanno in ogni lingua)
+        load = monitor.MONITOR.gpu_now()
+        if load is None:
             return {"ok": False}
+        return {"ok": True, "temp": None, "load": round(load), "mem_used": None, "mem_total": None, "power": None}
+
+    # ---------- utilizzo nel tempo (grafici) ----------
+    def get_usage(self, seconds=300):
+        return monitor.MONITOR.history(seconds)
+
+    def top_processes(self):
+        return monitor.MONITOR.top_processes()
 
     def get_gpu_tweaks(self):
         if not IS_WINDOWS:
@@ -640,7 +650,7 @@ class Api:
         }
 
     TWEAK_LABELS = {"game_mode": "Modalità Gioco", "hags": "Pianificazione GPU con accelerazione hardware",
-                    "high_perf": "Prestazioni elevate", "game_dvr": "Registrazione in background",
+                    "high_perf": "Prestazioni elevate", "game_dvr": "Registrazioni di Xbox Game Bar",
                     "mouse_raw": "Mouse senza accelerazione", "windowed_opt": "Ottimizzazioni per i giochi in finestra"}
 
     # ---------- mouse: "Migliora precisione puntatore" (accelerazione) ----------
@@ -689,7 +699,7 @@ class Api:
                 undo = {"type": "tweak", "name": name, "value": bool(self.get_gpu_tweaks().get(name))}
         r = self._apply_tweak(name, enabled)
         if r.get("ok") and undo:
-            history.add("optimize", f"{self.TWEAK_LABELS[name]}: {'attivata' if enabled else 'disattivata'}", undo=undo)
+            history.add("optimize", f"{self.TWEAK_LABELS[name]}: {'ON' if enabled else 'OFF'}", undo=undo)
         return r
 
     def _apply_tweak(self, name, enabled):
@@ -726,7 +736,7 @@ class Api:
                 self._reg_set(winreg.HKEY_CURRENT_USER,
                               r"Software\Microsoft\Windows\CurrentVersion\GameDVR",
                               "AppCaptureEnabled", 1 if enabled else 0)
-                return {"ok": True, "msg": "Registrazione in background " + ("attivata." if enabled else "disattivata.")}
+                return {"ok": True, "msg": "Registrazioni di Xbox Game Bar " + ("attivate." if enabled else "disattivate.")}
             if name == "high_perf":
                 guid = apptools.HIGH_PERF if enabled else apptools.BALANCED
                 if not apptools._set_plan(guid):
@@ -783,14 +793,18 @@ class Api:
     OPTIMAL = [("game_mode", True), ("hags", True), ("high_perf", True), ("game_dvr", False), ("windowed_opt", True)]
 
     def optimize_all(self, restore_point=True):
+        current = self.get_gpu_tweaks()
+        # solo quelle da cambiare: salta le opzioni già a posto e quelle che questo PC non ha
+        # (es. giochi in finestra su Windows 10), così la Cronologia resta pulita
+        todo = [(n, v) for n, v in self.OPTIMAL if current.get(n, False) is not None and bool(current.get(n)) != v]
+        if not todo:
+            return {"ok": True, "msg": "Le ottimizzazioni per i giochi erano già tutte attive.", "done": 0, "total": 0}
         notes = []
         if restore_point:
             rp = self.create_restore_point()
             if not rp["ok"]:
                 notes.append("Punto di ripristino non creato.")
-        current = self.get_gpu_tweaks()
-        # salta le opzioni che questo PC non ha (es. giochi in finestra su Windows 10)
-        results = [self.set_gpu_tweak(name, value) for name, value in self.OPTIMAL if current.get(name, False) is not None]
+        results = [self.set_gpu_tweak(name, value) for name, value in todo]
         done = sum(1 for r in results if r["ok"])
         failed = [r["msg"] for r in results if not r["ok"]]
         msg = f"{done} ottimizzazioni su {len(results)} applicate."
@@ -1306,6 +1320,8 @@ _FALLBACKS = {
     "speedtest_progress": lambda: {"status": "error", "msg": "Test non riuscito."},
     "driver_progress": lambda: {"status": "error", "msg": "Download non riuscito."},
     "security_progress": lambda: {"status": "idle"},
+    "get_usage": lambda: {"ok": False, "t": []},
+    "top_processes": lambda: {"ok": False, "cpu": [], "mem": []},
 }
 _ERROR_MSG = ("Qualcosa è andato storto. Se succede ancora usa Impostazioni → Aiuto e problemi → "
               "Crea report, così si vede il motivo.")

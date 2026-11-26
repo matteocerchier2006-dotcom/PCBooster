@@ -19,6 +19,7 @@ import installer
 import history
 import diagnostics
 import i18n
+import monitor
 from backend import Api, is_admin, relaunch_as_admin, harden_api, IS_WINDOWS
 
 ALLOWED_PREFS = set(updater.DEFAULT_SETTINGS) - {"game_mode_state", "game_mode_opts", "game_mode_close", "last_version",
@@ -83,7 +84,7 @@ class AppApi(Api):
     def prepare_update(self):
         """Controlla GitHub e, se c'è una versione nuova, la scarica in silenzio."""
         with self._update_lock:
-            if self._update["status"] in ("checking", "ready"):
+            if self._update["status"] in ("checking", "ready", "applied"):   # "applied": già installato, si attende il riavvio
                 return self._public_update()
             self._update = {"status": "checking"}
         r = updater.check_for_update()
@@ -134,6 +135,9 @@ class AppApi(Api):
         return {"state": state, "opts": s.get("game_mode_opts"), "apps": apps}
 
     def start_game_mode(self, opts, close_names):
+        current = updater.load_settings().get("game_mode_state")
+        if current:      # già attiva (es. doppio clic): non si sovrascrive il piano energetico da ripristinare
+            return dict(current, msg="La modalità partita è già attiva.")
         opts = {k: bool(v) for k, v in (opts or {}).items() if k in ("power", "ram", "close", "reopen")}
         names = [n for n in (close_names or []) if isinstance(n, str)]
         state = apptools.start_game_mode(opts, names)
@@ -250,6 +254,8 @@ def main():
 
     def on_start():
         tray.start_instance_server(icon.show_window)
+        monitor.MONITOR.set_active(not start_hidden)
+        monitor.MONITOR.start()          # comincia subito a raccogliere i dati per i grafici
         if prefs.get("tray_enabled", True) or start_hidden:
             if not icon.start() and start_hidden:
                 icon.show_window()   # senza icona non si può restare nascosti

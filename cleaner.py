@@ -165,8 +165,9 @@ def _remove(path, st=None, min_age=0, now=0):
         return 0, 1, 0
 
 
-def _size(path: str) -> int:
-    """Spazio occupato, senza entrare nei collegamenti."""
+def _size(path: str, min_age: int = 0, now: float = 0) -> int:
+    """Spazio occupato, senza entrare nei collegamenti. Con min_age non conta i file troppo recenti
+    (quelli che la pulizia lascia stare)."""
     try:
         st = os.lstat(path)
     except OSError:
@@ -174,7 +175,7 @@ def _size(path: str) -> int:
     if _is_link(st):
         return 0
     if not stat.S_ISDIR(st.st_mode):
-        return st.st_size
+        return 0 if _young(st, min_age, now) else st.st_size
     total = 0
     stack = [path]
     while stack:
@@ -193,8 +194,34 @@ def _size(path: str) -> int:
                     continue
                 if stat.S_ISDIR(est.st_mode):
                     stack.append(e.path)
-                else:
+                elif not _young(est, min_age, now):
                     total += est.st_size
+    return total
+
+
+def _cleanable_size(t) -> int:
+    """Quanto libererebbe davvero la pulizia di questa voce: stesse regole di _wipe
+    (non conta i file di oggi nei temporanei né le cartelle dell'app in uso)."""
+    total = 0
+    min_age, now = t.get("min_age", 0), time.time()
+    for d in _expand(t.get("dirs")):
+        try:
+            dst = os.lstat(d)
+            if _is_link(dst) or not stat.S_ISDIR(dst.st_mode):
+                continue
+            entries = list(os.scandir(d))
+        except OSError:
+            continue
+        for e in entries:
+            try:
+                st = e.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if not _skip_entry(e.name, e.path, st, 0, now):      # le cartelle vecchie possono avere file nuovi dentro
+                total += _size(e.path, min_age, now)
+    for f in _expand(t.get("files")):
+        if os.path.isfile(f):
+            total += _size(f)
     return total
 
 
@@ -436,8 +463,7 @@ class Cleaner:
                 except OSError:
                     size = 0
             else:
-                size = sum(_size(p) for p in _expand(t.get("dirs")) if os.path.isdir(p))
-                size += sum(_size(f) for f in _expand(t.get("files")) if os.path.isfile(f))
+                size = _cleanable_size(t)
             if sp in ("winold", "hibernate") and not size:
                 continue  # niente Windows.old o ibernazione già spenta: non mostrare la voce
             busy = [p for p in t.get("procs", []) if p in running]
@@ -558,7 +584,7 @@ class Cleaner:
                     st = e.stat(follow_symlinks=False)
                 except OSError:
                     continue
-                if _skip_entry(e.name, e.path, st, min_age, now):
+                if _skip_entry(e.name, e.path, st, 0, now):
                     continue
                 f, sk, _kept = _remove(e.path, st, min_age, now)
                 freed += f

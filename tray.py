@@ -118,6 +118,16 @@ class Tray:
             self._visible = True
         except Exception:
             pass
+        self._set_background(False)
+
+    def _set_background(self, hidden):
+        """Finestra nascosta: l'app smette di misurare e di aggiornare i grafici (non consuma risorse)."""
+        try:
+            import monitor
+            monitor.MONITOR.set_active(not hidden)
+            self.window.evaluate_js("window.pcbHidden = %s" % ("true" if hidden else "false"))
+        except Exception:
+            pass
 
     def on_closed(self):
         """La finestra si è chiusa davvero: toglie anche l'icona, così il programma termina."""
@@ -134,6 +144,7 @@ class Tray:
             return True
         self.window.hide()
         self._visible = False
+        self._set_background(True)
         if not self.hidden_tip_shown and not updater.load_settings().get("tray_tip_seen"):
             self.notify("PC Booster è ancora attivo",
                         "Lo trovi qui vicino all'orologio. Per chiuderlo del tutto: tasto destro → Esci.")
@@ -207,7 +218,13 @@ class Tray:
         except Exception as e:
             updater.log(f"Icona vicino all'orologio non disponibile: {e}")
             return False
+        # l'icona vicino all'orologio è piccola: si usa la versione disegnata a 32 pixel (nitida),
+        # non quella grande da 256 ridotta da Windows (sfocata)
         image = Image.open(self.icon_path)
+        try:
+            image = image.ico.getimage((32, 32))
+        except Exception:
+            pass
         M = pystray.MenuItem
         menu = pystray.Menu(
             M(lambda item: tr("Apri PC Booster"), lambda *_: self.show_window(), default=True),
@@ -245,10 +262,15 @@ class Tray:
             if u.get("status") == "ready":
                 found = True
                 if not self.window_visible() and not s.get("game_mode_state"):
-                    winutil.atomic_write(os.path.join(_data_dir(), "start_hidden"), "1")
+                    flag = os.path.join(_data_dir(), "start_hidden")
+                    winutil.atomic_write(flag, "1")
                     r = self.api.apply_update_now()
                     if r.get("ok"):
                         return
+                    try:       # aggiornamento non riuscito: la prossima apertura deve mostrare la finestra
+                        os.remove(flag)
+                    except OSError:
+                        pass
                 elif seen.get("app") != u.get("latest"):
                     self.notify("Aggiornamento di PC Booster pronto",
                                 f"La versione {u.get('latest')} si installa quando chiudi l'app.")

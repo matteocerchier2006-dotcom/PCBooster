@@ -58,12 +58,32 @@ def install_and_launch():
     return True
 
 
+def _safe_old_copy(path):
+    """Il file da eliminare dopo l'installazione deve essere un exe di PC Booster fuori dalle cartelle di sistema
+    (il percorso arriva dalle impostazioni, che un altro programma potrebbe modificare)."""
+    import re
+    if not isinstance(path, str) or not os.path.isabs(path):
+        return False
+    if not re.fullmatch(r"(?i)pc ?booster[\w .()\-]*\.exe", os.path.basename(path)):
+        return False
+    low = os.path.normcase(os.path.abspath(path))
+    for root in (os.environ.get("SystemRoot", r"C:\Windows"), os.environ.get("ProgramFiles", r"C:\Program Files"),
+                 os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")):
+        if root and low.startswith(os.path.normcase(os.path.abspath(root)) + os.sep):
+            return False
+    return True
+
+
 def post_start_maintenance(api, tray_mod):
     """Gira in background a ogni avvio della copia installata."""
     def run():
         s = updater.load_settings()
         # 1) elimina la copia vecchia (aspetta che si chiuda)
         old = s.get("old_install_path")
+        if old and not _safe_old_copy(old):
+            updater.log(f"Copia vecchia ignorata (percorso non valido): {old}")
+            updater.save_settings({"old_install_path": ""})
+            old = ""
         if old and not _same(old, sys.executable):
             for _ in range(30):
                 try:

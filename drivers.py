@@ -266,9 +266,9 @@ class DriverDownloader:
             import psutil
         except ImportError:
             psutil = None
-        roots = [os.path.normcase(folder)]
         drive = os.environ.get("SystemDrive", "C:")
-        roots += [os.path.normcase(os.path.join(drive + "\\", d)) for d in ("NVIDIA", "AMD")]
+        roots = [os.path.normcase(folder)] + [os.path.normcase(os.path.join(drive + "\\", d)) for d in ("NVIDIA", "AMD")]
+        roots = [r.rstrip("\\/") + os.sep for r in roots]      # "C:\\AMD\\" non deve valere per "C:\\AMDaltro"
         watched = {proc.pid}
         while time.time() - started < 3 * 3600:
             alive = False
